@@ -1,181 +1,6 @@
 import re
 from typing import Dict, Optional
 
-# Comprehensive phonetic dictionary mapping Roman Hinglish to pure Devanagari script.
-# This prevents Polly.Kajal-Neural from applying English phonetic rules (e.g. pronouncing "pet" as household pet animal).
-HINGLISH_TO_DEVANAGARI_MAP: Dict[str, str] = {
-    # Medical Complaints & Symptoms
-    "pet": "पेट",
-    "paet": "पेट",
-    "dard": "दर्द",
-    "drd": "दर्द",
-    "bukhar": "बुखार",
-    "bukhaar": "बुखार",
-    "khansi": "खांसी",
-    "khaansi": "खांसी",
-    "sardi": "सर्दी",
-    "zukham": "जुकाम",
-    "jukham": "जुकाम",
-    "sir": "सिर",
-    "sar": "सिर",
-    "aankh": "आँख",
-    "ankh": "आँख",
-    "aankhon": "आँखों",
-    "ankho": "आँखों",
-    "aankhe": "आँखें",
-    "chashma": "चश्मा",
-    "chashme": "चश्मे",
-    "gale": "गले",
-    "gala": "गला",
-    "paon": "पाँव",
-    "pair": "पैर",
-    "kamar": "कमर",
-    "dast": "दस्त",
-    "ulti": "उल्टी",
-    "chhati": "छाती",
-    "jalan": "जलन",
-    "kamzori": "कमज़ोरी",
-    "takleef": "तकलीफ",
-    "dikkat": "दिक्कत",
-    "pareshaani": "परेशानी",
-    "pareshani": "परेशानी",
-    "bimari": "बीमारी",
-    "dawa": "दवा",
-    "dawai": "दवाई",
-    "goli": "गोली",
-
-    # Dates, Times & Numbers
-    "kal": "कल",
-    "aaj": "आज",
-    "parso": "परसों",
-    "subah": "सुबह",
-    "dopahar": "दोपहर",
-    "shaam": "शाम",
-    "raat": "रात",
-    "baje": "बजे",
-    "bje": "बजे",
-    "din": "दिन",
-    "ghante": "घंटे",
-    "hafte": "हफ्ते",
-    "mahine": "महीने",
-    "somwar": "सोमवार",
-    "mangalwar": "मंगलवार",
-    "budhwar": "बुधवार",
-    "guruwar": "गुरुवार",
-    "shukrawar": "शुक्रवार",
-    "shaniwar": "शनिवार",
-    "raviwar": "रविवार",
-    "ek": "एक",
-    "do": "दो",
-    "teen": "तीन",
-    "chaar": "चार",
-    "char": "चार",
-    "paanch": "पाँच",
-    "panch": "पाँच",
-    "chhe": "छह",
-    "saat": "सात",
-    "aath": "आठ",
-    "nau": "नौ",
-    "das": "दस",
-    "gyarah": "ग्यारह",
-    "barah": "बारह",
-
-    # Clinic, Politeness & Conversational Openers
-    "ji": "जी",
-    "bilkul": "बिल्कुल",
-    "theek": "ठीक",
-    "thik": "ठीक",
-    "haan": "हाँ",
-    "han": "हाँ",
-    "nahi": "नहीं",
-    "nahin": "नहीं",
-    "namaste": "नमस्ते",
-    "shukriya": "शुक्रिया",
-    "dhanyawad": "धन्यवाद",
-    "doctor": "डॉक्टर",
-    "sahab": "साहब",
-    "dr": "डॉ.",
-    "clinic": "क्लिनिक",
-    "hospital": "अस्पताल",
-    "fees": "फीस",
-    "fee": "फीस",
-    "paisa": "पैसे",
-    "paise": "पैसे",
-    "rupaye": "रुपये",
-    "rupees": "रुपये",
-    "appointment": "अपॉइंटमेंट",
-    "booking": "बुकिंग",
-    "checkup": "चेकअप",
-    "check": "चेक",
-    "karwana": "करवाना",
-    "karwani": "करवानी",
-    "dikhana": "दिखाना",
-    "dikhaana": "दिखाना",
-    "milna": "मिलना",
-    "aana": "आना",
-
-    # Pronouns, Relations, Grammar & Helpers
-    "aur": "और",
-    "mein": "में",
-    "me": "में",
-    "se": "से",
-    "ko": "को",
-    "ka": "का",
-    "ki": "की",
-    "ke": "के",
-    "hai": "है",
-    "hain": "हैं",
-    "tha": "था",
-    "thi": "थी",
-    "hoga": "होगा",
-    "hogi": "होगी",
-    "ho": "हो",
-    "gaya": "गया",
-    "gayi": "गई",
-    "kya": "क्या",
-    "kab": "कब",
-    "kahan": "कहाँ",
-    "kaha": "कहाँ",
-    "kaise": "कैसे",
-    "kitna": "कितना",
-    "kitne": "कितने",
-    "kitni": "कितनी",
-    "aap": "आप",
-    "aapka": "आपका",
-    "aapke": "आपके",
-    "aapki": "आपकी",
-    "mera": "मेरा",
-    "mere": "मेरे",
-    "meri": "मेरी",
-    "unka": "उनका",
-    "unke": "उनके",
-    "unki": "उनकी",
-    "dost": "दोस्त",
-    "bhai": "भाई",
-    "naam": "नाम",
-    "shubh": "शुभ",
-    "number": "नंबर",
-    "phone": "फ़ोन",
-    "liye": "लिए",
-    "chahiye": "चाहिए",
-    "kripya": "कृपया",
-    "batayein": "बताइए",
-    "bataiye": "बताइए",
-    "samajh": "समझ",
-    "pukka": "पक्का",
-    "pakka": "पक्का",
-    "rahega": "रहेगा",
-    "rahegi": "रहेगी",
-    "karen": "करें",
-    "kijiye": "कीजिए"
-}
-
-# Pre-compiled word boundary regex for microsecond execution
-WORD_PATTERN = re.compile(
-    r'\b(' + '|'.join(re.escape(k) for k in HINGLISH_TO_DEVANAGARI_MAP.keys()) + r')\b',
-    flags=re.IGNORECASE
-)
-
 # Compound Hindi spoken number dictionary for fast spoken digit recognition
 HINDI_SPOKEN_NUMBERS: Dict[str, str] = {
     'shunya': '0', 'zero': '0',
@@ -203,69 +28,47 @@ HINDI_SPOKEN_NUMBERS: Dict[str, str] = {
 
 def parse_spoken_hindi_numbers(text: str) -> Optional[str]:
     """
-    Parses fast Hindi spoken compound numbers (e.g. 'atthasi chaubees chhiyalis basath untees')
-    or spaced digits ('88 24 46 62 29') into a normalized 10-digit mobile number.
+    Parses spoken Hindi compound numbers or raw digits into a normalized 10-digit mobile number.
     Returns 10-digit string if found, otherwise None.
     """
     if not text:
         return None
 
     # First check if there is an explicit 10 digit number already
-    clean_digits_only = re.sub(r'[^0-9]', '', text)
-    match_direct = re.search(r'\b[6-9]\d{9}\b', clean_digits_only)
-    if match_direct:
-        return match_direct.group(0)
+    raw_digits = "".join(ch for ch in text if ch.isdigit())
+    if len(raw_digits) == 10 and raw_digits[0] in "6789":
+        return raw_digits
+    if len(raw_digits) >= 10:
+        for idx in range(len(raw_digits) - 9):
+            candidate = raw_digits[idx:idx+10]
+            if candidate[0] in "6789":
+                return candidate
 
-    # Parse spoken words into digits
-    words = re.split(r'[\s\-]+', text.lower())
+    # Parse spoken compound words
+    words = text.lower().replace("-", " ").split()
     digits_found = []
     for w in words:
-        w_clean = re.sub(r'[^a-z0-9]', '', w)
-        if w_clean.isdigit():
-            digits_found.append(w_clean)
-        elif w_clean in HINDI_SPOKEN_NUMBERS:
-            digits_found.append(HINDI_SPOKEN_NUMBERS[w_clean])
+        clean_w = "".join(ch for ch in w if ch.isalnum())
+        if clean_w.isdigit():
+            digits_found.append(clean_w)
+        elif clean_w in HINDI_SPOKEN_NUMBERS:
+            digits_found.append(HINDI_SPOKEN_NUMBERS[clean_w])
 
-    joined = ''.join(digits_found)
-    match_compound = re.search(r'\b[6-9]\d{9}\b', joined)
-    if match_compound:
-        return match_compound.group(0)
-    
-    match_any_10 = re.search(r'\d{10}', joined)
-    if match_any_10:
-        return match_any_10.group(0)
+    joined = "".join(digits_found)
+    if len(joined) == 10:
+        return joined
+    if len(joined) >= 10:
+        for idx in range(len(joined) - 9):
+            candidate = joined[idx:idx+10]
+            if candidate[0] in "6789":
+                return candidate
 
     return None
 
 def format_digits_for_readback(phone_number: str) -> str:
     """
-    Formats a 10-digit number with spaces between each digit so TTS reads each digit clearly:
+    Formats a 10-digit number with spaces between each digit for clear TTS speech:
     e.g. '8824466229' -> '8 8 2 4 4 6 6 2 2 9'
     """
-    clean = re.sub(r'\D', '', phone_number)
-    return ' '.join(list(clean))
-
-def normalize_for_indian_voice(text: str) -> str:
-    """
-    Normalizes mixed English/Hinglish text into native Devanagari phonetics.
-    Eliminates the American/foreign accent completely when spoken by Polly.Kajal-Neural.
-    """
-    if not text:
-        return text
-
-    # Clean redundant slot formats e.g. "10:00 AM baje" -> "10:00 बजे"
-    text = re.sub(r'(\d{1,2}):00\s*(?:AM|PM|am|pm)\s*baje', r'\1:00 baje', text)
-    text = re.sub(r'(\d{1,2})\s*(?:AM|PM|am|pm)\s*baje', r'\1 baje', text)
-    text = re.sub(r'(\d{1,2}):00\s*(?:AM|am)', r'\1:00 बजे', text)
-    text = re.sub(r'(\d{1,2}):00\s*(?:PM|pm)', r'\1:00 बजे', text)
-
-    # Convert common Roman Hinglish words to Devanagari
-    def _replacer(match: re.Match) -> str:
-        word = match.group(0).lower()
-        return HINGLISH_TO_DEVANAGARI_MAP.get(word, match.group(0))
-
-    converted = WORD_PATTERN.sub(_replacer, text)
-
-    # Clean double spaces
-    converted = re.sub(r'\s+', ' ', converted).strip()
-    return converted
+    clean = "".join(ch for ch in phone_number if ch.isdigit())
+    return " ".join(clean)

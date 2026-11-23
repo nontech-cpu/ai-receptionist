@@ -26,12 +26,24 @@ FAST_MODELS = [
     ("gemini-3.5-flash-lite", 1.0)
 ]
 
-INVALID_NAMES = {
-    "dost", "friend", "mere dost", "apne dost", "bhai", "brother", 
-    "papa", "father", "mummy", "mother", "sister", "patient", "unknown", "relative",
-    "apna", "apne", "apna ji", "kapna", "kalpana", "khud", "self", "myself", "mera", "mere", "meri",
-    "someone", "anybody", "one", "cafe", "cough", "cold", "fever", "bukhar", "dast", "khansi",
-    "pain", "dard", "ill", "sick", "problem", "takleef", "issue"
+FALLBACK_LISTENING_CUES = {
+    "HINGLISH": [
+        "Haanji sun rahi hoon, boliye.",
+        "Ji bilkul, sun rahi hoon.",
+        "Haanji, main note kar rahi hoon, kahiye.",
+        "Ji boliye, main sun rahi hoon."
+    ],
+    "ENGLISH": [
+        "Yes, I am listening. Please go ahead.",
+        "Certainly, please continue.",
+        "I am listening, please go ahead.",
+        "Yes, please tell me."
+    ],
+    "HINDI_DEVANAGARI": [
+        "जी हाँ, मैं सुन रही हूँ। कहिये।",
+        "जी बिल्कुल, कहिये।",
+        "जी, मैं सुन रही हूँ।"
+    ]
 }
 
 TOOLS_DEFINITION = [
@@ -94,31 +106,15 @@ def detect_caller_language(text: str) -> str:
     if is_devanagari_text(text):
         return "HINDI_DEVANAGARI"
 
-    english_cues = {
-        "i", "want", "need", "appointment", "doctor", "sharma", "fever", "cough", 
-        "available", "time", "fee", "fees", "address", "please", "can", "could", 
-        "would", "like", "for", "my", "name", "is", "at", "tomorrow", "today", 
-        "morning", "evening", "hello", "hi", "hey", "good", "am", "pm", "pain", 
-        "have", "has", "booking", "book", "call", "phone", "number", "what", "where",
-        "when", "how", "much", "cost", "clinic", "who", "which"
-    }
-    hindi_cues = {
-        "mujhe", "mera", "mere", "meri", "chahiye", "hai", "hain", "karna", "karana",
-        "karwana", "dost", "bhai", "baje", "kal", "aaj", "subah", "shaam", "dast", 
-        "bukhar", "khansi", "dard", "paon", "pet", "sir", "naam", "kya", "kab", 
-        "kahan", "kitna", "kitne", "theek", "haan", "nahi", "nahin", "unka", "unki"
-    }
-    words = re.findall(r'[a-zA-Z]+', text.lower())
-    if not words:
+    words = set(text.lower().split())
+    hinglish_markers = {"hai", "hain", "karna", "chahiye", "mera", "meri", "mere", "mujhe", "baje", "naam", "theek", "nahi", "nahin", "kripya", "aaj", "kal", "subah", "shaam", "sham"}
+    if words & hinglish_markers:
         return "HINGLISH"
 
-    hindi_count = sum(1 for w in words if w in hindi_cues)
-    english_count = sum(1 for w in words if w in english_cues)
-
-    if hindi_count > 0 and hindi_count >= english_count:
-        return "HINGLISH"
-    if english_count >= 1:
+    english_markers = {"i", "want", "need", "appointment", "doctor", "fever", "cough", "tomorrow", "today", "morning", "evening", "hello", "hi", "what", "where", "how", "please", "book", "is", "my", "name", "can"}
+    if words & english_markers:
         return "ENGLISH"
+
     return "HINGLISH"
 
 def get_live_schedule_summary() -> str:
@@ -210,16 +206,9 @@ class LLMService:
 
         # Check if caller wants to gracefully end call after booking is completed
         if session.is_completed:
-            closing_words = [
-                "nahi", "nahin", "no", "nope", "nothing", "kuch nahi", "kuch nhi", 
-                "bas", "bus", "thank you", "thanks", "dhanyawad", "shukriya", 
-                "bye", "goodbye", "all set", "ho gaya", "theek hai bas", "nahi bas"
-            ]
-            has_question = any(q in user_lower for q in [
-                "kya", "kitna", "kitne", "kab", "kahan", "kaha", "fee", "fees", 
-                "address", "timing", "charge", "paisa", "paise", "cost", "pata", "doctor"
-            ])
-            is_closing = any(re.search(r'\b' + re.escape(c) + r'\b', user_lower) for c in closing_words) and not has_question
+            closing_cues = ["nahi", "no", "bas", "bus", "thank", "dhanyawad", "shukriya", "bye", "goodbye", "done", "all set"]
+            has_question = any(q in user_lower for q in ["kya", "kitna", "kitne", "kab", "kahan", "kaha", "fee", "fees", "address", "timing", "cost", "pata", "doctor"])
+            is_closing = any(c in user_lower for c in closing_cues) and not has_question
             if is_closing:
                 if caller_lang == "ENGLISH":
                     closing_reply = "Thank you very much! Please arrive at the clinic 10 minutes prior to your slot. Take care and goodbye!"
@@ -259,53 +248,14 @@ class LLMService:
                 args = func_call.get("args", {})
                 patient_name = args.get("patient_name", "Patient").strip().title()
 
-                # Validate patient name against relationship words, pronouns, or illness terms
-                if patient_name.lower() in INVALID_NAMES or len(patient_name) <= 2:
-                    prompt_for_name = "Certainly! Could you please share the patient's full name so I can confirm the booking?" if caller_lang == "ENGLISH" else "Ji bilkul! Kripya mareez ka shubh naam bata dijiye taaki main appointment book kar sakoon?"
-                    session_manager.add_model_message(call_sid, prompt_for_name)
-                    logger.info(f"[CALL {call_sid[-6:]}] Filtered invalid name '{patient_name}'. Asking for real patient name.")
-                    return prompt_for_name, False
-
-                # Grounding Verification Guard: Verify caller actually verbally specified date or time
-                user_utterances = " ".join([
-                    p.get("text", "") 
-                    for m in session.messages if m.get("role") == "user" 
-                    for p in m.get("parts", [])
-                ]).lower()
-
-                temporal_cues = {
-                    "kal", "aaj", "parso", "today", "tomorrow", "yesterday",
-                    "morning", "evening", "afternoon", "night", "subah", "shaam", "sham", "dopahar", "raat",
-                    "baje", "am", "pm", "o'clock", "oclock", "slot", "time", "samay", "waqt",
-                    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-                    "somwar", "mangalwar", "budhwar", "guruwar", "veervar", "shukrawar", "shaniwar", "ravivar",
-                    "11", "12", "1", "2", "6", "7", "8", "noon"
-                }
-                caller_mentioned_time = any(re.search(r'\b' + re.escape(cue) + r'\b', user_utterances) for cue in temporal_cues)
-
-                if not caller_mentioned_time:
-                    prompt_for_time = (
-                        "Understood! Which day and time slot would you prefer to visit Dr. Sharma?" 
-                        if caller_lang == "ENGLISH" 
-                        else "Ji bilkul, maine note kar liya hai. Doctor Sharma se milne ke liye kaunsa din aur samay theek rahega?"
-                    )
-                    session_manager.add_model_message(call_sid, prompt_for_time)
-                    logger.info(f"[CALL {call_sid[-6:]}] Grounding guard: Caller has not selected date/time yet. Asking for preferred time.")
-                    return prompt_for_time, False
-
-                # Validate phone number
+                # Clean contact number
                 raw_phone = str(args.get("phone_number") or "")
-                parsed_phone = parse_spoken_hindi_numbers(raw_phone)
-                phone = parsed_phone or (session.caller_phone if session.caller_phone and len(re.sub(r'\D', '', session.caller_phone)) >= 10 else None)
-
-                if not phone or len(re.sub(r'\D', '', phone)) < 10:
-                    prompt_phone = "Please share your 10-digit contact mobile number to confirm the booking." if caller_lang == "ENGLISH" else "Appointment confirm karne ke liye kripya apna 10-digit mobile number bata dijiye."
-                    session_manager.add_model_message(call_sid, prompt_phone)
-                    logger.info(f"[CALL {call_sid[-6:]}] Phone missing or incomplete. Asking for phone number.")
-                    return prompt_phone, False
-
-                clean_digits = re.sub(r'\D', '', phone)[-10:]
-                readback = format_digits_for_readback(clean_digits)
+                clean_digits = "".join(ch for ch in raw_phone if ch.isdigit())
+                if len(clean_digits) < 10 and session.caller_phone:
+                    clean_digits = "".join(ch for ch in session.caller_phone if ch.isdigit())[-10:]
+                if not clean_digits:
+                    clean_digits = "9999999999"
+                readback = " ".join(clean_digits)
 
                 date_val = args.get("date", today_str)
                 slot = args.get("time_slot", "11:00 AM")
@@ -367,13 +317,11 @@ class LLMService:
             return cleaned, is_done
 
         except Exception as e:
-            logger.warning(f"[CALL {call_sid[-6:]}] LLM budget or error ({e}). Returning instant holding phrase.")
-            if caller_lang == "ENGLISH":
-                fallback = "Understood! Which date and time would you prefer for Dr. Sharma?"
-            elif caller_lang == "HINDI_DEVANAGARI":
-                fallback = "जी बिल्कुल, मैंने नोट कर लिया है। डॉक्टर शर्मा से मिलने के लिए कौनसा दिन और समय सही रहेगा?"
-            else:
-                fallback = "Ji bilkul, maine note kar liya hai. Doctor Sharma se milne ke liye kaunsa din aur time theek rahega?"
+            logger.warning(f"[CALL {call_sid[-6:]}] LLM budget or error ({e}). Returning natural dynamic listening cue.")
+            cues = FALLBACK_LISTENING_CUES.get(caller_lang, FALLBACK_LISTENING_CUES["HINGLISH"])
+            idx = getattr(session, "fallback_idx", 0)
+            fallback = cues[idx % len(cues)]
+            session.fallback_idx = idx + 1
             session_manager.add_model_message(call_sid, fallback)
             return fallback, False
 

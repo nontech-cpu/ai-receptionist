@@ -32,19 +32,43 @@ def get_base_url(request: Request) -> str:
     """Dynamically determines the public HTTPS URL from railway / reverse-proxy headers."""
     proto = request.headers.get("x-forwarded-proto", "https")
     host = request.headers.get("x-forwarded-host", request.headers.get("host", "web-production-eedb2a06.up.railway.app"))
-    return f"{proto}://{host}"
+    return f"{proto}://{host}".rstrip("/")
 
-def create_gather() -> Gather:
+async def extract_request_data(request: Request) -> dict:
+    """
+    Extracts parameters from both GET query params and POST form/json data seamlessly.
+    Guarantees 100% interoperability regardless of whether Twilio sends GET or POST.
+    """
+    data = dict(request.query_params)
+    if request.method.upper() == "POST":
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            try:
+                json_data = await request.json()
+                if isinstance(json_data, dict):
+                    data.update(json_data)
+            except Exception:
+                pass
+        else:
+            try:
+                form = await request.form()
+                data.update(dict(form))
+            except Exception:
+                pass
+    return data
+
+def create_gather(base_url: str = "") -> Gather:
     """
     Standard listening window supporting speech + keypad DTMF input:
-    - speech_timeout='auto' prevents Twilio from cutting off caller prematurely during natural conversational pauses.
-    - Uses relative action='/voice/respond' so Twilio stays on the active HTTPS connection without 301 redirects.
+    - speech_timeout='auto' prevents Twilio from cutting off caller prematurely.
+    - Explicit absolute action URL prevents cross-host resolution failures.
     """
+    action_url = f"{base_url}/voice/respond" if base_url else "/voice/respond"
     return Gather(
         input="speech dtmf",
         num_digits=10,
         finish_on_key="#",
-        action="/voice/respond",
+        action=action_url,
         method="POST",
         speech_timeout="auto",
         timeout="8",
@@ -92,19 +116,20 @@ def speak_or_play(parent_element, text: str, base_url: str):
     say = parent_element.say(voice="Polly.Kajal-Neural", language=lang)
     say.prosody(clean_text, rate="93%")
 
-@router.post("/voice/incoming")
-@router.post("/twilio/voice")
-@router.post("/")
+@router.api_route("/voice/incoming", methods=["GET", "POST"])
+@router.api_route("/twilio/voice", methods=["GET", "POST"])
+@router.api_route("/voice", methods=["GET", "POST"])
 async def voice_incoming(request: Request):
     """
-    Call answers -> Speaks greeting in English -> waits 10s.
+    Call answers -> Speaks greeting in English/Hindi -> waits for user speech.
+    Supports both GET and POST to handle all Twilio webhook configurations.
     """
-    form_data = await request.form()
-    call_sid = form_data.get("CallSid", "unknown_call")
-    caller_phone = form_data.get("From", "")
+    data = await extract_request_data(request)
+    call_sid = data.get("CallSid", "unknown_call")
+    caller_phone = data.get("From", "")
 
     base_url = get_base_url(request)
-    print(f"\n[CALL ANSWERED] CallSid={call_sid[-6:]}, From={caller_phone}")
+    print(f"\n[CALL ANSWERED] CallSid={call_sid[-6:]}, From={caller_phone}, Method={request.method}")
 
     session = session_manager.get_or_create(call_sid, caller_phone)
     greeting = get_initial_greeting()
@@ -112,7 +137,7 @@ async def voice_incoming(request: Request):
     session_manager.add_model_message(call_sid, greeting)
 
     if settings.ENABLE_STREAMING and settings.DEEPGRAM_API_KEY:
-        host = request.headers.get("x-forwarded-host", request.headers.get("host", "tightly-barbell-creamed.ngrok-free.dev"))
+        host = request.headers.get("x-forwarded-host", request.headers.get("host", "web-production-eedb2a06.up.railway.app"))
         ws_url = f"wss://{host}/voice/stream"
         print(f"[CALL {call_sid[-6:]}] Connecting to Realtime WebSocket Media Stream: {ws_url}")
         resp = VoiceResponse()
@@ -125,26 +150,27 @@ async def voice_incoming(request: Request):
 
     resp = VoiceResponse()
     speak_or_play(resp, greeting, base_url)
-    gather = create_gather()
+    gather = create_gather(base_url)
     resp.append(gather)
 
     # If initial 8s silence expires, Twilio falls through to voice/respond automatically
-    resp.redirect("/voice/respond", method="POST")
+    resp.redirect(f"{base_url}/voice/respond", method="POST")
 
     return Response(content=str(resp), media_type="text/xml")
 
-@router.post("/voice/respond")
+@router.api_route("/voice/respond", methods=["GET", "POST"])
 async def voice_respond(request: Request):
     """
-    Handles speech input or the 10-second silence gap state machine:
-    - 10s gap without speech -> Says: 'You are not audible. Please go ahead.'
-    - Another 10s gap without speech -> Says: 'You are still not audible. Goodbye.' -> Hangs up!
+    Handles speech input or the silence gap state machine:
+    - 8s gap without speech -> Says: 'You are not audible. Please go ahead.'
+    - Another 8s gap without speech -> Says: 'You are still not audible. Goodbye.' -> Hangs up!
+    Supports both GET and POST to handle any Twilio redirect or probe.
     """
-    form_data = await request.form()
-    call_sid = form_data.get("CallSid", "unknown_call")
-    user_speech = form_data.get("SpeechResult", "").strip()
-    digits = form_data.get("Digits", "").strip()
-    confidence = form_data.get("Confidence", "1.0")
+    data = await extract_request_data(request)
+    call_sid = data.get("CallSid", "unknown_call")
+    user_speech = data.get("SpeechResult", "").strip()
+    digits = data.get("Digits", "").strip()
+    confidence = data.get("Confidence", "1.0")
 
     if digits:
         if user_speech:
@@ -158,7 +184,7 @@ async def voice_respond(request: Request):
 
     resp = VoiceResponse()
 
-    # Case 1: USER DID NOT SPEAK (10s Silence Triggered)
+    # Case 1: USER DID NOT SPEAK (Silence Triggered)
     if not user_speech:
         # If booking is already done, user stayed silent to finish -> Graceful wrap-up!
         if session.is_completed:
@@ -171,16 +197,16 @@ async def voice_respond(request: Request):
         print(f"[CALL {call_sid[-6:]}] Silence detected! Consecutive count = {session.silence_count}")
 
         if session.silence_count == 1:
-            # First 8s silence warning
+            # First silence warning
             silence_msg = "माफ़ कीजियेगा, आपकी आवाज़ नहीं आई। कृपया बताइये मैं आपकी क्या सहायता करूँ?"
             speak_or_play(resp, silence_msg, base_url)
-            gather = create_gather()
+            gather = create_gather(base_url)
             resp.append(gather)
-            resp.redirect("/voice/respond", method="POST")
+            resp.redirect(f"{base_url}/voice/respond", method="POST")
             return Response(content=str(resp), media_type="text/xml")
 
         else:
-            # Second silence (Total ~16s of no audio) -> Hangup!
+            # Second silence -> Hangup!
             print(f"[CALL {call_sid[-6:]}] Second silence reached. Ending call.")
             speak_or_play(resp, f"आपकी आवाज़ नहीं आ रही है। {p.clinic_name} में कॉल करने के लिए धन्यवाद। नमस्ते!", base_url)
             resp.hangup()
@@ -201,20 +227,24 @@ async def voice_respond(request: Request):
         resp.hangup()
     else:
         # Active conversation: gather next user response
-        gather = create_gather()
+        gather = create_gather(base_url)
         resp.append(gather)
         # If user stays silent after reply, falls through to silence handler
-        resp.redirect("/voice/respond", method="POST")
+        resp.redirect(f"{base_url}/voice/respond", method="POST")
 
     return Response(content=str(resp), media_type="text/xml")
 
-@router.post("/api/make-call")
-async def trigger_outbound_call(to_number: str = "+918824466229", webhook_url: str = ""):
+@router.api_route("/api/make-call", methods=["GET", "POST"])
+async def trigger_outbound_call(request: Request, to_number: str = "+918824466229", webhook_url: str = ""):
     if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
         return {"error": "Twilio credentials not configured."}
 
+    data = await extract_request_data(request)
+    raw_to = data.get("to_number", to_number)
+    raw_webhook = data.get("webhook_url", webhook_url)
+
     # Clean and sanitize target phone number
-    clean_to = to_number.strip().replace(" ", "").replace("-", "")
+    clean_to = raw_to.strip().replace(" ", "").replace("-", "")
 
     # Dynamic Trial Mapping: Automatically uses the assigned Twilio number per tester
     TRIAL_FROM_MAP = {
@@ -224,9 +254,9 @@ async def trigger_outbound_call(to_number: str = "+918824466229", webhook_url: s
     from_number = TRIAL_FROM_MAP.get(clean_to, settings.TWILIO_PHONE_NUMBER)
 
     # Clean and sanitize target webhook URL
-    raw = (webhook_url or "").strip().rstrip(". ").rstrip("/")
+    raw = (raw_webhook or "").strip().rstrip(". ").rstrip("/")
     if not raw:
-        raw = "https://web-production-eedb2a06.up.railway.app"
+        raw = get_base_url(request)
     if not raw.startswith("http://") and not raw.startswith("https://"):
         raw = f"https://{raw}"
     raw = raw.rstrip(". ").rstrip("/")
@@ -241,10 +271,18 @@ async def trigger_outbound_call(to_number: str = "+918824466229", webhook_url: s
         call = client.calls.create(
             to=clean_to,
             from_=from_number,
-            url=target_url
+            url=target_url,
+            method="POST"
         )
         logger.info(f"[OUTBOUND CALL] Triggered call to {clean_to} from {from_number} with webhook: {target_url} (SID: {call.sid})")
-        return {"status": "success", "call_sid": call.sid, "from": from_number, "target_url": target_url, "message": f"Calling {clean_to} now from {from_number}..."}
+        return {
+            "status": "success",
+            "call_sid": call.sid,
+            "to": clean_to,
+            "from": from_number,
+            "target_url": target_url,
+            "message": f"Calling {clean_to} now from {from_number}..."
+        }
     except Exception as e:
         logger.error(f"Failed to initiate outbound call: {e}")
         return {"error": str(e)}

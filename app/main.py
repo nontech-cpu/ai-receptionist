@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import openpyxl
 
 from app.core.config import settings
-from app.routes.twilio_routes import router as twilio_router
+from app.routes.twilio_routes import router as twilio_router, voice_incoming
 from app.services.sheet_service import sheet_service
 from app.services.telegram_service import telegram_service
 from app.services.llm_service import llm_service
@@ -164,11 +164,20 @@ def get_architecture_video():
         return HTMLResponse(content=fallback_path.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>Architecture video not found</h1>", status_code=404)
 
-@app.get("/", response_class=HTMLResponse)
-def index():
-    """Serves the Management & Testing Dashboard."""
-    return """
-<!DOCTYPE html>
+@app.api_route("/", methods=["GET", "POST"])
+async def index(request: Request):
+    """
+    Serves the Management & Testing Dashboard for browsers.
+    If requested by Twilio voice webhook, seamlessly returns TwiML greeting!
+    """
+    params = dict(request.query_params)
+    user_agent = request.headers.get("user-agent", "").lower()
+    
+    # If Twilio calls the root URL "/" instead of "/voice/incoming", handle gracefully
+    if "callsid" in [k.lower() for k in params.keys()] or "twilio" in user_agent:
+        return await voice_incoming(request)
+        
+    html_content = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -211,28 +220,61 @@ def index():
                 
                 <!-- Quick Outbound Call Box -->
                 <div class="bg-slate-800/70 p-6 rounded-2xl border border-slate-700 shadow-md">
-                    <h2 class="text-lg font-semibold text-white flex items-center mb-4">
+                    <h2 class="text-lg font-semibold text-white flex items-center mb-2">
                         <i class="fa-solid fa-phone-volume text-blue-400 mr-2"></i>
                         Test Live Call on Your Phone
                     </h2>
-                    <p class="text-sm text-slate-400 mb-4">
-                        Aapke number (<strong class="text-slate-200">+918824466229</strong>) par Twilio se direct call aayegi aur AI receptionist aapse live baat karegi.
+                    <p class="text-xs text-slate-400 mb-3">
+                        Select a verified number below or enter any number. Maya will call immediately:
                     </p>
+
+                    <!-- Quick Preset Tester Buttons -->
+                    <div class="grid grid-cols-2 gap-2 mb-3">
+                        <button type="button" onclick="selectPreset('+919549408914', '+17372212163', 'Sir')" id="presetSir"
+                            class="p-2.5 rounded-xl border border-blue-500/40 bg-blue-500/10 hover:bg-blue-500/20 text-left transition flex flex-col">
+                            <span class="text-xs font-bold text-white flex items-center">
+                                <i class="fa-solid fa-user-doctor text-blue-400 mr-1.5"></i> Sir
+                            </span>
+                            <span class="text-[11px] font-mono text-blue-300 mt-0.5">+919549408914</span>
+                            <span class="text-[9px] text-slate-400 mt-0.5">Caller: +1 (737) 221-2163</span>
+                        </button>
+                        <button type="button" onclick="selectPreset('+918824466229', '+17372508034', 'Neeraj')" id="presetNeeraj"
+                            class="p-2.5 rounded-xl border border-slate-700 bg-slate-900/60 hover:bg-slate-800 text-left transition flex flex-col">
+                            <span class="text-xs font-bold text-white flex items-center">
+                                <i class="fa-solid fa-user text-emerald-400 mr-1.5"></i> Neeraj
+                            </span>
+                            <span class="text-[11px] font-mono text-slate-300 mt-0.5">+918824466229</span>
+                            <span class="text-[9px] text-slate-400 mt-0.5">Caller: +1 (737) 250-8034</span>
+                        </button>
+                    </div>
+
                     <div class="space-y-3">
                         <div>
-                            <label class="block text-xs font-medium text-slate-400 mb-1">Target Phone Number (with Country Code):</label>
-                            <input id="targetPhone" type="tel" value="+918824466229" placeholder="+919876543210" 
+                            <div class="flex justify-between items-center mb-1">
+                                <label class="text-xs font-medium text-slate-400">Target Phone Number:</label>
+                                <span id="callerIdBadge" class="text-[10px] text-blue-400 font-mono">From: +1 (737) 221-2163</span>
+                            </div>
+                            <input id="targetPhone" type="tel" value="+919549408914" placeholder="+919549408914" 
                                 class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono">
                         </div>
                         <div>
-                            <label class="block text-xs font-medium text-slate-400 mb-1">Server Public URL (Auto-detected):</label>
+                            <label class="block text-xs font-medium text-slate-400 mb-1">Server Public Webhook URL:</label>
                             <input id="ngrokUrl" type="url" placeholder="Auto-detecting server URL..." 
-                                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500">
+                                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono">
                         </div>
+
+                        <!-- Important Trial Instruction Banner -->
+                        <div class="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-[11px] text-amber-300 flex items-start space-x-2">
+                            <i class="fa-solid fa-circle-exclamation mt-0.5 text-amber-400 flex-shrink-0"></i>
+                            <div>
+                                <span class="font-bold">Twilio Trial Verification:</span> Call aane par jab Twilio bole <em>"Press any key to execute your code"</em>, apne phone par <strong>'1' dabayein</strong>. Uske baad Maya turant shuru ho jayegi!
+                            </div>
+                        </div>
+
                         <button onclick="triggerCall()" id="callBtn"
                             class="w-full py-2.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium rounded-xl shadow-lg shadow-blue-500/20 transition flex items-center justify-center space-x-2">
                             <i class="fa-solid fa-phone"></i>
-                            <span>Call Target Phone Now</span>
+                            <span id="callBtnText">Call Selected Phone Now</span>
                         </button>
                         <p id="callStatus" class="text-xs text-center font-medium mt-2 hidden"></p>
                     </div>
@@ -551,9 +593,23 @@ def index():
             }
         }
 
+        function selectPreset(phone, callerId, name) {
+            document.getElementById('targetPhone').value = phone;
+            document.getElementById('callerIdBadge').innerText = 'From: ' + callerId;
+            const btnSir = document.getElementById('presetSir');
+            const btnNeeraj = document.getElementById('presetNeeraj');
+            if (name === 'Sir') {
+                btnSir.className = 'p-2.5 rounded-xl border border-blue-500/40 bg-blue-500/10 text-left transition flex flex-col';
+                btnNeeraj.className = 'p-2.5 rounded-xl border border-slate-700 bg-slate-900/60 hover:bg-slate-800 text-left transition flex flex-col';
+            } else {
+                btnNeeraj.className = 'p-2.5 rounded-xl border border-emerald-500/40 bg-emerald-500/10 text-left transition flex flex-col';
+                btnSir.className = 'p-2.5 rounded-xl border border-slate-700 bg-slate-900/60 hover:bg-slate-800 text-left transition flex flex-col';
+            }
+        }
+
         async function triggerCall() {
-            let phone = document.getElementById('targetPhone') ? document.getElementById('targetPhone').value.trim() : '+918824466229';
-            let ngrok = document.getElementById('ngrokUrl').value.trim().replace(/\\.+$/, '').replace(/\\/+$/, '');
+            let phone = document.getElementById('targetPhone') ? document.getElementById('targetPhone').value.trim() : '+919549408914';
+            let serverUrl = document.getElementById('ngrokUrl').value.trim().replace(/[/]+$/, '');
             const status = document.getElementById('callStatus');
             const btn = document.getElementById('callBtn');
 
@@ -562,24 +618,24 @@ def index():
                 return;
             }
 
-            if (!ngrok) {
-                alert('Server URL could not be detected. Please enter URL manually.');
-                return;
+            if (!serverUrl) {
+                serverUrl = window.location.origin;
+                document.getElementById('ngrokUrl').value = serverUrl;
             }
 
             btn.disabled = true;
-            btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i> Calling...';
+            btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i> Dialing...';
             status.className = 'text-xs text-center text-yellow-400 mt-2 block';
-            status.innerText = `Initiating Twilio call to ${phone}...`;
+            status.innerText = `Calling ${phone} from Twilio... Answer and press '1' when asked!`;
 
             try {
-                const res = await fetch(`/api/make-call?to_number=${encodeURIComponent(phone)}&webhook_url=${encodeURIComponent(ngrok)}`, {
+                const res = await fetch(`/api/make-call?to_number=${encodeURIComponent(phone)}&webhook_url=${encodeURIComponent(serverUrl)}`, {
                     method: 'POST'
                 });
                 const data = await res.json();
                 if (data.status === 'success') {
                     status.className = 'text-xs text-center text-emerald-400 mt-2 block';
-                    status.innerText = 'Phone ringing! Pick up the call to talk to Maya.';
+                    status.innerText = `Ring sent! Calling from ${data.from}. Pick up and press '1' to start talking!`;
                 } else {
                     status.className = 'text-xs text-center text-red-400 mt-2 block';
                     status.innerText = data.error || 'Failed to call.';
@@ -589,7 +645,7 @@ def index():
                 status.innerText = 'Network error initiating call.';
             } finally {
                 btn.disabled = false;
-                btn.innerHTML = '<i class="fa-solid fa-phone"></i> <span>Call My Phone Now</span>';
+                btn.innerHTML = '<i class="fa-solid fa-phone"></i> <span>Call Selected Phone Now</span>';
             }
         }
 
@@ -653,3 +709,11 @@ def index():
 </body>
 </html>
     """
+    return HTMLResponse(
+        content=html_content,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )

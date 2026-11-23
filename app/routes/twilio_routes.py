@@ -92,6 +92,7 @@ def speak_or_play(parent_element, text: str, base_url: str):
     say.prosody(clean_text, rate="93%")
 
 @router.post("/voice/incoming")
+@router.post("/twilio/voice")
 @router.post("/")
 async def voice_incoming(request: Request):
     """
@@ -211,15 +212,25 @@ async def trigger_outbound_call(to_number: str = "+918824466229", webhook_url: s
     if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
         return {"error": "Twilio credentials not configured."}
 
-    # Clean and sanitize target webhook URL (strip spaces, trailing dots, trailing slashes)
+    # Clean and sanitize target phone number
+    clean_to = to_number.strip().replace(" ", "").replace("-", "")
+
+    # Dynamic Trial Mapping: Automatically uses the assigned Twilio number per tester
+    TRIAL_FROM_MAP = {
+        "+919549408914": "+17372212163",  # Sir's assigned Twilio trial number
+        "+918824466229": "+17372508034",  # Primary tester's assigned Twilio trial number
+    }
+    from_number = TRIAL_FROM_MAP.get(clean_to, settings.TWILIO_PHONE_NUMBER)
+
+    # Clean and sanitize target webhook URL
     raw = (webhook_url or "").strip().rstrip(". ").rstrip("/")
     if not raw:
-        raw = "https://tightly-barbell-creamed.ngrok-free.dev"
+        raw = "https://web-production-eedb2a06.up.railway.app"
     if not raw.startswith("http://") and not raw.startswith("https://"):
         raw = f"https://{raw}"
     raw = raw.rstrip(". ").rstrip("/")
 
-    if not raw.endswith("/voice/incoming"):
+    if not raw.endswith("/voice/incoming") and not raw.endswith("/twilio/voice"):
         target_url = f"{raw}/voice/incoming"
     else:
         target_url = raw
@@ -227,12 +238,12 @@ async def trigger_outbound_call(to_number: str = "+918824466229", webhook_url: s
     try:
         client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
         call = client.calls.create(
-            to=to_number,
-            from_=settings.TWILIO_PHONE_NUMBER,
+            to=clean_to,
+            from_=from_number,
             url=target_url
         )
-        logger.info(f"[OUTBOUND CALL] Triggered call to {to_number} with webhook: {target_url} (SID: {call.sid})")
-        return {"status": "success", "call_sid": call.sid, "target_url": target_url, "message": f"Calling {to_number} now..."}
+        logger.info(f"[OUTBOUND CALL] Triggered call to {clean_to} from {from_number} with webhook: {target_url} (SID: {call.sid})")
+        return {"status": "success", "call_sid": call.sid, "from": from_number, "target_url": target_url, "message": f"Calling {clean_to} now from {from_number}..."}
     except Exception as e:
         logger.error(f"Failed to initiate outbound call: {e}")
         return {"error": str(e)}

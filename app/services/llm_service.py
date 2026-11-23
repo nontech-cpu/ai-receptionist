@@ -20,20 +20,28 @@ http_session = requests.Session()
 http_session.headers.update({"Connection": "close"})
 
 FAST_MODELS = [
-    ("gemini-3.1-flash-lite", 4.0),
-    ("gemini-flash-lite-latest", 4.0),
+    ("gemini-flash-lite-latest", 3.0),
+    ("gemini-3.1-flash-lite", 3.5),
     ("gemini-3.5-flash-lite", 4.0)
+]
+
+INVALID_RELATION_NAMES = [
+    "dost", "friend", "mere dost", "apne dost", "bhai", "brother", 
+    "papa", "father", "mummy", "mother", "sister", "patient", "unknown", "relative",
+    "apna", "apne", "apna ji", "kapna", "kalpana", "khud", "self", "myself", "mera", "mere", "meri",
+    "someone", "anybody", "one"
 ]
 
 HINDI_SYMPTOM_MAP = {
     "dast": "दस्त (Loose motion / Diarrhea)",
     "dust": "दस्त (Loose motion)",  # Common telephonic STT confusion for dast
     "just": "दस्त (Loose motion)",
-    "loose motion": "Loose motion",
+    "loose motion": "Loose motion (दस्त)",
+    "pet kharab": "पेट खराब (Stomach upset)",
     "bukhar": "बुखार (Fever)",
-    "fever": "Fever",
+    "fever": "बुखार (Fever)",
     "khansi": "खांसी (Cough)",
-    "cough": "Cough",
+    "cough": "खांसी (Cough)",
     "sardi": "सर्दी-जुकाम (Cold)",
     "jukham": "जुकाम (Cold)",
     "zukham": "जुकाम (Cold)",
@@ -54,7 +62,11 @@ HINDI_SYMPTOM_MAP = {
     "acidity": "Acidity",
     "ulti": "उल्टी (Vomiting)",
     "vomit": "Vomiting",
-    "vomiting": "Vomiting"
+    "vomiting": "Vomiting",
+    "chakkar": "चक्कर आना (Dizziness)",
+    "badan dard": "बदन दर्द (Body ache)",
+    "gale mein dard": "गले में दर्द (Sore throat)",
+    "tabiyat kharab": "तबीयत खराब (General Checkup)"
 }
 
 HINDI_DURATION_PATTERNS = [
@@ -82,6 +94,15 @@ def extract_slots_from_text(user_speech: str, session) -> dict:
                 logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Symptom: {label}")
                 break
 
+    # If previous model turn asked for problem/takleef and caller describes it
+    if not slots.get("symptoms") and len(session.messages) >= 1:
+        last_model_msg = session.messages[-1].get("parts", [{}])[0].get("text", "").lower()
+        if any(w in last_model_msg for w in ["takleef", "pareshani", "dikkat", "symptoms", "परेशानी", "तकलीफ"]):
+            clean_symp = user_speech.strip()
+            if len(clean_symp) >= 3 and clean_symp.lower() not in INVALID_RELATION_NAMES:
+                slots["symptoms"] = clean_symp
+                logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Captured Direct Symptom: {clean_symp}")
+
     # 2. Duration extraction
     if not slots.get("duration"):
         for pat, val in HINDI_DURATION_PATTERNS:
@@ -90,14 +111,35 @@ def extract_slots_from_text(user_speech: str, session) -> dict:
                 logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Duration: {val}")
                 break
 
-    # 3. Patient Name extraction (e.g. 'devender ko dast hai', 'rahul ke liye appointment')
+    # 3. Patient Name extraction
     if not slots.get("patient_name"):
-        m = re.search(r'\b([A-Za-z\u0900-\u097f]{3,20})\s+(?:ko|ke liye|ka|ki)\b', user_speech, re.IGNORECASE)
-        if m:
-            cand = m.group(1).strip()
+        # Pattern A: 'mera naam X hai', 'naam X hai', 'patient ka naam X'
+        m_name = re.search(r'\b(?:mera\s+naam|naam\s+hai|naam|name\s+is|patient\s+ka\s+naam)\s+([A-Za-z\u0900-\u097f]{3,20})\b', user_speech, re.IGNORECASE)
+        if m_name:
+            cand = m_name.group(1).strip()
             if cand.lower() not in INVALID_RELATION_NAMES and cand.lower() not in HINDI_SYMPTOM_MAP:
                 slots["patient_name"] = cand.capitalize()
-                logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Name: {slots['patient_name']}")
+                logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Name (via 'naam'): {slots['patient_name']}")
+
+        # Pattern B: 'X ko', 'X ke liye', 'X ka appointment'
+        if not slots.get("patient_name"):
+            m = re.search(r'\b([A-Za-z\u0900-\u097f]{3,20})\s+(?:ko|ke liye|ka|ki)\b', user_speech, re.IGNORECASE)
+            if m:
+                cand = m.group(1).strip()
+                if cand.lower() not in INVALID_RELATION_NAMES and cand.lower() not in HINDI_SYMPTOM_MAP:
+                    slots["patient_name"] = cand.capitalize()
+                    logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Name: {slots['patient_name']}")
+
+        # Pattern C: Direct single/double word name reply if previous assistant turn asked for name
+        if not slots.get("patient_name") and len(session.messages) >= 1:
+            last_model_msg = session.messages[-1].get("parts", [{}])[0].get("text", "").lower()
+            if any(w in last_model_msg for w in ["naam", "name", "शुभ नाम"]):
+                words = user_speech.strip().split()
+                if 1 <= len(words) <= 3:
+                    cand = words[0].strip()
+                    if cand.lower() not in INVALID_RELATION_NAMES and cand.lower() not in HINDI_SYMPTOM_MAP and len(cand) >= 3:
+                        slots["patient_name"] = " ".join(w.capitalize() for w in words)
+                        logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Direct Name: {slots['patient_name']}")
 
     # 4. Spoken Phone extraction
     if not slots.get("phone_number"):
@@ -259,13 +301,6 @@ def split_sentences(buffer: str) -> tuple[list[str], str]:
         last_end = match.end()
     remaining = buffer[last_end:]
     return sentences, remaining
-
-INVALID_RELATION_NAMES = [
-    "dost", "friend", "mere dost", "apne dost", "bhai", "brother", 
-    "papa", "father", "mummy", "mother", "sister", "patient", "unknown", "relative",
-    "apna", "apne", "apna ji", "kapna", "kalpana", "khud", "self", "myself", "mera", "mere", "meri",
-    "someone", "anybody", "one"
-]
 
 class LLMService:
     def __init__(self):
@@ -606,8 +641,8 @@ class LLMService:
             yield fallback, False
 
     def _call_gemini_api(self, contents: list, system_prompt: str, include_tools: bool = True) -> dict:
-        """Synchronous REST API call with capped sliding window for <1.0s turnaround."""
-        recent_messages = contents[-2:] if len(contents) > 2 else contents
+        """Synchronous REST API call retaining last 8 messages for full call context."""
+        recent_messages = contents[-8:] if len(contents) > 8 else contents
         payload = {
             "system_instruction": {
                 "parts": [{"text": system_prompt}]

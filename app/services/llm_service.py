@@ -26,11 +26,12 @@ FAST_MODELS = [
     ("gemini-3.5-flash-lite", 1.0)
 ]
 
-INVALID_RELATION_NAMES = {
+INVALID_NAMES = {
     "dost", "friend", "mere dost", "apne dost", "bhai", "brother", 
     "papa", "father", "mummy", "mother", "sister", "patient", "unknown", "relative",
     "apna", "apne", "apna ji", "kapna", "kalpana", "khud", "self", "myself", "mera", "mere", "meri",
-    "someone", "anybody", "one"
+    "someone", "anybody", "one", "cafe", "cough", "cold", "fever", "bukhar", "dast", "khansi",
+    "pain", "dard", "ill", "sick", "problem", "takleef", "issue"
 }
 
 TOOLS_DEFINITION = [
@@ -38,13 +39,13 @@ TOOLS_DEFINITION = [
         "function_declarations": [
             {
                 "name": "book_appointment",
-                "description": "Confirm and record patient appointment into the clinic database.",
+                "description": "Confirm and record patient appointment into the clinic database. ONLY call when caller has verbally confirmed name, symptoms, date, and preferred time slot.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "patient_name": {
                             "type": "STRING",
-                            "description": "Actual person full name of the patient (e.g. Sunil, Devendra, Anita, Neeraj). Never relation words like 'dost' or 'bhai'."
+                            "description": "Actual human full name of the patient (e.g. Sunil, Devendra, Anita, Neeraj). Never relation words like 'dost' or illness words like 'cough'."
                         },
                         "phone_number": {
                             "type": "STRING",
@@ -52,11 +53,11 @@ TOOLS_DEFINITION = [
                         },
                         "date": {
                             "type": "STRING",
-                            "description": "Appointment date in YYYY-MM-DD format (e.g. 2026-11-24)"
+                            "description": "Appointment date in YYYY-MM-DD format (e.g. 2026-11-24). ONLY fill if explicitly chosen or agreed by caller. Do not guess."
                         },
                         "time_slot": {
                             "type": "STRING",
-                            "description": "Selected time slot e.g. 11:00 AM, 11:15 AM, 06:00 PM, 06:30 PM, 07:15 PM"
+                            "description": "Selected time slot e.g. 11:00 AM, 11:15 AM, 06:00 PM, 06:30 PM, 07:15 PM. ONLY fill if explicitly chosen or agreed by caller. Do not guess."
                         },
                         "symptoms": {
                             "type": "STRING",
@@ -258,12 +259,39 @@ class LLMService:
                 args = func_call.get("args", {})
                 patient_name = args.get("patient_name", "Patient").strip().title()
 
-                # Validate patient name against relationship words or pronouns
-                if patient_name.lower() in INVALID_RELATION_NAMES or len(patient_name) <= 2:
+                # Validate patient name against relationship words, pronouns, or illness terms
+                if patient_name.lower() in INVALID_NAMES or len(patient_name) <= 2:
                     prompt_for_name = "Certainly! Could you please share the patient's full name so I can confirm the booking?" if caller_lang == "ENGLISH" else "Ji bilkul! Kripya mareez ka shubh naam bata dijiye taaki main appointment book kar sakoon?"
                     session_manager.add_model_message(call_sid, prompt_for_name)
                     logger.info(f"[CALL {call_sid[-6:]}] Filtered invalid name '{patient_name}'. Asking for real patient name.")
                     return prompt_for_name, False
+
+                # Grounding Verification Guard: Verify caller actually verbally specified date or time
+                user_utterances = " ".join([
+                    p.get("text", "") 
+                    for m in session.messages if m.get("role") == "user" 
+                    for p in m.get("parts", [])
+                ]).lower()
+
+                temporal_cues = {
+                    "kal", "aaj", "parso", "today", "tomorrow", "yesterday",
+                    "morning", "evening", "afternoon", "night", "subah", "shaam", "sham", "dopahar", "raat",
+                    "baje", "am", "pm", "o'clock", "oclock", "slot", "time", "samay", "waqt",
+                    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+                    "somwar", "mangalwar", "budhwar", "guruwar", "veervar", "shukrawar", "shaniwar", "ravivar",
+                    "11", "12", "1", "2", "6", "7", "8", "noon"
+                }
+                caller_mentioned_time = any(re.search(r'\b' + re.escape(cue) + r'\b', user_utterances) for cue in temporal_cues)
+
+                if not caller_mentioned_time:
+                    prompt_for_time = (
+                        "Understood! Which day and time slot would you prefer to visit Dr. Sharma?" 
+                        if caller_lang == "ENGLISH" 
+                        else "Ji bilkul, maine note kar liya hai. Doctor Sharma se milne ke liye kaunsa din aur samay theek rahega?"
+                    )
+                    session_manager.add_model_message(call_sid, prompt_for_time)
+                    logger.info(f"[CALL {call_sid[-6:]}] Grounding guard: Caller has not selected date/time yet. Asking for preferred time.")
+                    return prompt_for_time, False
 
                 # Validate phone number
                 raw_phone = str(args.get("phone_number") or "")

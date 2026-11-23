@@ -299,8 +299,11 @@ async def trigger_outbound_call(request: Request, to_number: str = "+91882446622
             "message": f"Calling {clean_to} now from {from_number}..."
         }
     except Exception as e:
-        logger.error(f"Failed to initiate outbound call: {e}")
-        return {"error": str(e)}
+        err_msg = str(e)
+        if "isn't assigned to this verified voice recipient" in err_msg or "21215" in err_msg:
+            err_msg = f"Twilio Trial Restriction: {clean_to} is not verified. Please call a verified number (+918824466229 / +918441937079) or verify {clean_to} in Twilio Console first."
+        logger.error(f"Failed to initiate outbound call: {err_msg}")
+        return {"error": err_msg}
 
 @router.websocket("/voice/stream")
 async def voice_stream_endpoint(websocket: WebSocket):

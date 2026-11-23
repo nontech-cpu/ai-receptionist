@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import time
 import requests
 from datetime import datetime, timedelta
 from typing import AsyncGenerator, Optional
@@ -18,10 +19,11 @@ logger = logging.getLogger(__name__)
 http_session = requests.Session()
 http_session.headers.update({"Connection": "close"})
 
+TOTAL_LLM_TIMEOUT_BUDGET = 3.2
+
 FAST_MODELS = [
-    ("gemini-3.5-flash-lite", 4.0),
-    ("gemini-flash-lite-latest", 4.0),
-    ("gemini-3.1-flash-lite", 4.0)
+    ("gemini-flash-lite-latest", 2.2),
+    ("gemini-3.5-flash-lite", 1.0)
 ]
 
 INVALID_RELATION_NAMES = {
@@ -151,7 +153,7 @@ class LLMService:
 
     def _call_gemini_api(self, contents: list, system_prompt: str, include_tools: bool = True) -> dict:
         """
-        Synchronous REST API call to Gemini Flash-Lite.
+        Synchronous REST API call to Gemini Flash-Lite governed by a strict 3.2-second budget.
         Retains up to the last 10 messages of conversation history to preserve full call context.
         """
         recent_messages = contents[-10:] if len(contents) > 10 else contents
@@ -162,24 +164,31 @@ class LLMService:
             "contents": recent_messages,
             "generationConfig": {
                 "temperature": 0.2,
-                "maxOutputTokens": 120
+                "maxOutputTokens": 100
             }
         }
         if include_tools:
             payload["tools"] = TOOLS_DEFINITION
 
-        for model, t_sec in FAST_MODELS:
+        start_time = time.time()
+        deadline = start_time + TOTAL_LLM_TIMEOUT_BUDGET
+
+        for model, preferred_timeout in FAST_MODELS:
+            remaining = deadline - time.time()
+            if remaining <= 0.35:
+                break
+            timeout_sec = min(preferred_timeout, remaining)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
             try:
-                res = http_session.post(url, json=payload, timeout=t_sec)
+                res = http_session.post(url, json=payload, timeout=timeout_sec)
                 if res.status_code == 200:
                     return res.json()
-                logger.warning(f"[LLM] Model {model} returned HTTP {res.status_code}, trying next fallback...")
+                logger.warning(f"[LLM] Model {model} returned HTTP {res.status_code}, checking remaining budget...")
             except Exception as e:
-                logger.warning(f"[LLM] Model {model} exception: {e}")
+                logger.warning(f"[LLM] Model {model} error or timeout ({timeout_sec:.2f}s budget): {e}")
                 continue
 
-        raise Exception("All Gemini LLM models failed or timed out.")
+        raise TimeoutError("Gemini LLM exceeded strict 3.2s latency budget.")
 
     def process_turn(self, call_sid: str, user_speech: str) -> tuple[str, bool]:
         """
@@ -330,8 +339,13 @@ class LLMService:
             return cleaned, is_done
 
         except Exception as e:
-            logger.error(f"[CALL {call_sid[-6:]}] Error in LLM turn: {e}")
-            fallback = "Certainly! Could you please share your symptoms and preferred time to see Dr. Sharma?" if caller_lang == "ENGLISH" else "Ji bilkul, aap apni takleef aur doctor se milne ka samay bata dijiye."
+            logger.warning(f"[CALL {call_sid[-6:]}] LLM budget or error ({e}). Returning instant holding phrase.")
+            if caller_lang == "ENGLISH":
+                fallback = "Understood! Which date and time would you prefer for Dr. Sharma?"
+            elif caller_lang == "HINDI_DEVANAGARI":
+                fallback = "जी बिल्कुल, मैंने नोट कर लिया है। डॉक्टर शर्मा से मिलने के लिए कौनसा दिन और समय सही रहेगा?"
+            else:
+                fallback = "Ji bilkul, maine note kar liya hai. Doctor Sharma se milne ke liye kaunsa din aur time theek rahega?"
             session_manager.add_model_message(call_sid, fallback)
             return fallback, False
 

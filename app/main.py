@@ -224,36 +224,13 @@ async def index(request: Request):
                         <i class="fa-solid fa-phone-volume text-blue-400 mr-2"></i>
                         Test Live Call on Your Phone
                     </h2>
-                    <p class="text-xs text-slate-400 mb-3">
-                        Select a verified number below or enter any number. Maya will call immediately:
+                    <p class="text-xs text-slate-400 mb-4">
+                        Phone number enter karein, Twilio se Maya turant call karegi:
                     </p>
-
-                    <!-- Quick Preset Tester Buttons -->
-                    <div class="grid grid-cols-2 gap-2 mb-3">
-                        <button type="button" onclick="selectPreset('+919549408914', '+17372212163', 'Sir')" id="presetSir"
-                            class="p-2.5 rounded-xl border border-blue-500/40 bg-blue-500/10 hover:bg-blue-500/20 text-left transition flex flex-col">
-                            <span class="text-xs font-bold text-white flex items-center">
-                                <i class="fa-solid fa-user-doctor text-blue-400 mr-1.5"></i> Sir
-                            </span>
-                            <span class="text-[11px] font-mono text-blue-300 mt-0.5">+919549408914</span>
-                            <span class="text-[9px] text-slate-400 mt-0.5">Caller: +1 (737) 221-2163</span>
-                        </button>
-                        <button type="button" onclick="selectPreset('+918824466229', '+17372508034', 'Neeraj')" id="presetNeeraj"
-                            class="p-2.5 rounded-xl border border-slate-700 bg-slate-900/60 hover:bg-slate-800 text-left transition flex flex-col">
-                            <span class="text-xs font-bold text-white flex items-center">
-                                <i class="fa-solid fa-user text-emerald-400 mr-1.5"></i> Neeraj
-                            </span>
-                            <span class="text-[11px] font-mono text-slate-300 mt-0.5">+918824466229</span>
-                            <span class="text-[9px] text-slate-400 mt-0.5">Caller: +1 (737) 250-8034</span>
-                        </button>
-                    </div>
 
                     <div class="space-y-3">
                         <div>
-                            <div class="flex justify-between items-center mb-1">
-                                <label class="text-xs font-medium text-slate-400">Target Phone Number:</label>
-                                <span id="callerIdBadge" class="text-[10px] text-blue-400 font-mono">From: +1 (737) 221-2163</span>
-                            </div>
+                            <label class="block text-xs font-medium text-slate-400 mb-1">Target Phone Number (with Country Code):</label>
                             <input id="targetPhone" type="tel" value="+919549408914" placeholder="+919549408914" 
                                 class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono">
                         </div>
@@ -267,14 +244,14 @@ async def index(request: Request):
                         <div class="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-[11px] text-amber-300 flex items-start space-x-2">
                             <i class="fa-solid fa-circle-exclamation mt-0.5 text-amber-400 flex-shrink-0"></i>
                             <div>
-                                <span class="font-bold">Twilio Trial Verification:</span> Call aane par jab Twilio bole <em>"Press any key to execute your code"</em>, apne phone par <strong>'1' dabayein</strong>. Uske baad Maya turant shuru ho jayegi!
+                                <span class="font-bold">Twilio Trial Rule:</span> Call aane par jab Twilio bole <em>"Press any key to execute your code"</em>, phone keypad par <strong>'1' dabayein</strong>. Maya turant start ho jayegi!
                             </div>
                         </div>
 
                         <button onclick="triggerCall()" id="callBtn"
                             class="w-full py-2.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium rounded-xl shadow-lg shadow-blue-500/20 transition flex items-center justify-center space-x-2">
                             <i class="fa-solid fa-phone"></i>
-                            <span id="callBtnText">Call Selected Phone Now</span>
+                            <span id="callBtnText">Call Phone Now</span>
                         </button>
                         <p id="callStatus" class="text-xs text-center font-medium mt-2 hidden"></p>
                     </div>
@@ -593,20 +570,6 @@ async def index(request: Request):
             }
         }
 
-        function selectPreset(phone, callerId, name) {
-            document.getElementById('targetPhone').value = phone;
-            document.getElementById('callerIdBadge').innerText = 'From: ' + callerId;
-            const btnSir = document.getElementById('presetSir');
-            const btnNeeraj = document.getElementById('presetNeeraj');
-            if (name === 'Sir') {
-                btnSir.className = 'p-2.5 rounded-xl border border-blue-500/40 bg-blue-500/10 text-left transition flex flex-col';
-                btnNeeraj.className = 'p-2.5 rounded-xl border border-slate-700 bg-slate-900/60 hover:bg-slate-800 text-left transition flex flex-col';
-            } else {
-                btnNeeraj.className = 'p-2.5 rounded-xl border border-emerald-500/40 bg-emerald-500/10 text-left transition flex flex-col';
-                btnSir.className = 'p-2.5 rounded-xl border border-slate-700 bg-slate-900/60 hover:bg-slate-800 text-left transition flex flex-col';
-            }
-        }
-
         async function triggerCall() {
             let phone = document.getElementById('targetPhone') ? document.getElementById('targetPhone').value.trim() : '+919549408914';
             let serverUrl = document.getElementById('ngrokUrl').value.trim().replace(/[/]+$/, '');
@@ -645,7 +608,7 @@ async def index(request: Request):
                 status.innerText = 'Network error initiating call.';
             } finally {
                 btn.disabled = false;
-                btn.innerHTML = '<i class="fa-solid fa-phone"></i> <span>Call Selected Phone Now</span>';
+                btn.innerHTML = '<i class="fa-solid fa-phone"></i> <span>Call Phone Now</span>';
             }
         }
 

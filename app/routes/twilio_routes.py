@@ -18,7 +18,8 @@ VOICE_LANG = "en-IN"
 SPEECH_HINTS = (
     "fees, fee, paise, rupees, consultation, charge, cost, address, location, landmark, timing, "
     "parking, appointment, booking, doctor, clinic, Devendra, Rahul, Sharma, "
-    "today, tomorrow, number, phone, bhai, bukhar, khansi, checkup"
+    "today, tomorrow, number, phone, bhai, bukhar, khansi, checkup, "
+    "I want to book an appointment, appointment book karna hai, doctor se milna hai, checkup karwana hai"
 )
 
 def get_initial_greeting() -> str:
@@ -243,13 +244,18 @@ async def trigger_outbound_call(request: Request, to_number: str = "+91882446622
     raw_to = data.get("to_number", to_number)
     raw_webhook = data.get("webhook_url", webhook_url)
 
-    # Clean and sanitize target phone number
+    # Clean and sanitize target phone number (auto prepend +91 for 10-digit Indian numbers)
     clean_to = raw_to.strip().replace(" ", "").replace("-", "")
+    if clean_to and not clean_to.startswith("+"):
+        if len(clean_to) == 10:
+            clean_to = f"+91{clean_to}"
+        else:
+            clean_to = f"+{clean_to}"
 
     # Dynamic Trial Mapping: Automatically uses the assigned Twilio number per tester
     TRIAL_FROM_MAP = {
-        "+919549408914": "+17372212163",  # Sir's assigned Twilio trial number
-        "+918824466229": "+17372508034",  # Primary tester's assigned Twilio trial number
+        "+919549408914": "+17372212163",  # Assigned Twilio trial number for +919549408914
+        "+918824466229": "+17372508034",  # Assigned Twilio trial number for +918824466229
     }
     from_number = TRIAL_FROM_MAP.get(clean_to, settings.TWILIO_PHONE_NUMBER)
 
@@ -267,12 +273,12 @@ async def trigger_outbound_call(request: Request, to_number: str = "+91882446622
         target_url = raw
 
     try:
+        # Note: Do NOT pass method="POST" into calls.create because Twilio trial accounts reject it with HTTP 400
         client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
         call = client.calls.create(
             to=clean_to,
             from_=from_number,
-            url=target_url,
-            method="POST"
+            url=target_url
         )
         logger.info(f"[OUTBOUND CALL] Triggered call to {clean_to} from {from_number} with webhook: {target_url} (SID: {call.sid})")
         return {

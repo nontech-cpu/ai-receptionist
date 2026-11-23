@@ -140,7 +140,9 @@ def split_sentences(buffer: str) -> tuple[list[str], str]:
 
 INVALID_RELATION_NAMES = [
     "dost", "friend", "mere dost", "apne dost", "bhai", "brother", 
-    "papa", "father", "mummy", "mother", "sister", "patient", "unknown", "relative"
+    "papa", "father", "mummy", "mother", "sister", "patient", "unknown", "relative",
+    "apna", "apne", "apna ji", "kapna", "kalpana", "khud", "self", "myself", "mera", "mere", "meri",
+    "someone", "anybody", "one"
 ]
 
 class LLMService:
@@ -322,14 +324,14 @@ class LLMService:
             args = function_call_payload.get("args", {})
             patient_name = args.get("patient_name", "Patient").strip().title()
 
-            # Filter relation words from being recorded as names
-            if patient_name.lower() in INVALID_RELATION_NAMES:
+            # Filter relation words or pronouns from being recorded as names
+            if patient_name.lower() in INVALID_RELATION_NAMES or len(patient_name) <= 2:
                 if user_lang == "HINDI":
-                    prompt_for_name = "जी बिल्कुल! आपके दोस्त का शुभ नाम क्या है ताकि मैं अपॉइंटमेंट बुक कर सकूँ?"
+                    prompt_for_name = "जी बिल्कुल! कृपया मरीज का शुभ नाम बता दीजिए ताकि मैं अपॉइंटमेंट बुक कर सकूँ?"
                 else:
                     prompt_for_name = "Certainly! Could you please share the patient's full name so I can confirm the booking?"
                 session_manager.add_model_message(call_sid, prompt_for_name)
-                logger.info(f"[CALL {call_sid[-6:]}] Filtered relation '{patient_name}'. Asking for real patient name.")
+                logger.info(f"[CALL {call_sid[-6:]}] Filtered invalid name '{patient_name}'. Asking for real patient name.")
                 yield prompt_for_name, False
                 return
 
@@ -563,13 +565,13 @@ class LLMService:
                 args = func_call.get("args", {})
                 patient_name = args.get("patient_name", "Patient").strip().title()
 
-                if patient_name.lower() in INVALID_RELATION_NAMES:
+                if patient_name.lower() in INVALID_RELATION_NAMES or len(patient_name) <= 2:
                     if user_lang == "HINDI":
-                        prompt_for_name = "जी बिल्कुल! आपके दोस्त का शुभ नाम क्या है ताकि मैं अपॉइंटमेंट बुक कर सकूँ?"
+                        prompt_for_name = "जी बिल्कुल! कृपया मरीज का शुभ नाम बता दीजिए ताकि मैं अपॉइंटमेंट बुक कर सकूँ?"
                     else:
                         prompt_for_name = "Certainly! Could you please share the patient's full name so I can confirm the booking?"
                     session_manager.add_model_message(call_sid, prompt_for_name)
-                    logger.info(f"[CALL {call_sid[-6:]}] Filtered relation '{patient_name}'. Asking for real patient name.")
+                    logger.info(f"[CALL {call_sid[-6:]}] Filtered invalid name '{patient_name}'. Asking for real patient name.")
                     return prompt_for_name, False
 
                 # Parse and validate 10-digit phone number

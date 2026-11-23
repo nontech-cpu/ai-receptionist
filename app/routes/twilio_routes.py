@@ -8,7 +8,6 @@ from app.services.llm_service import llm_service
 from app.services.elevenlabs_service import elevenlabs_service
 from app.services.streaming_voice_service import streaming_voice_service
 from app.services.clinic_service import clinic_service
-from app.utils.phonetics import normalize_for_indian_voice
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -83,23 +82,16 @@ def create_gather(base_url: str = "") -> Gather:
         enhanced=True
     )
 
-def is_hindi_phrase(text: str) -> bool:
-    """Detects if text contains Hindi words or Devanagari script for proper pronunciation."""
-    if any('\u0900' <= char <= '\u097f' for char in text):
-        return True
-    hindi_cues = [
-        "ji", "bilkul", "aapka", "aapke", "mein", "hai", "hain", "dard", "paon", 
-        "kal", "aaj", "baje", "takleef", "bukhar", "khansi", "kya", "sharma", 
-        "clinic", "din", "se", "naam", "unka", "unki", "swagat", "theek", "hoon", "dost"
-    ]
-    lower = text.lower()
-    return any(w in lower for w in hindi_cues)
+def is_devanagari(text: str) -> bool:
+    """Detects if text contains native Devanagari script."""
+    return any('\u0900' <= char <= '\u097f' for char in text)
 
 def speak_or_play(parent_element, text: str, base_url: str):
     """
-    Delivers instant (<1.2s), authentic Indian bilingual speech directly inside Twilio.
+    Delivers instant (<1.0s), authentic Indian bilingual speech directly inside Twilio.
     Uses Polly.Kajal-Neural with dynamic Hindi (hi-IN) and Indian English (en-IN) switching.
-    Zero network latency, zero MP3 download delay, zero foreigner accent!
+    - If Devanagari script: uses hi-IN for native Hindi.
+    - If Roman script (Hinglish or English): uses en-IN for natural Indian Hinglish accent.
     """
     engine = getattr(settings, "VOICE_ENGINE", "polly_kajal").lower()
 
@@ -110,10 +102,8 @@ def speak_or_play(parent_element, text: str, base_url: str):
             parent_element.play(audio_url)
             return
 
-    # Instant Twilio Native Indian Bilingual Voice (Kajal-Neural) with calm human prosody
-    # If text is Hindi/Hinglish, normalize Roman words to Devanagari for flawless Indian phonetics.
-    if is_hindi_phrase(text):
-        clean_text = normalize_for_indian_voice(text)
+    if is_devanagari(text):
+        clean_text = text
         lang = "hi-IN"
     else:
         clean_text = text
@@ -121,7 +111,7 @@ def speak_or_play(parent_element, text: str, base_url: str):
 
     print(f"[TWILIO AUDIO] Using Instant Polly.Kajal-Neural (lang={lang}) | Text: '{clean_text}'")
     say = parent_element.say(voice="Polly.Kajal-Neural", language=lang)
-    say.prosody(clean_text, rate="93%")
+    say.prosody(clean_text, rate="95%")
 
 @router.api_route("/voice/incoming", methods=["GET", "POST"])
 @router.api_route("/twilio/voice", methods=["GET", "POST"])

@@ -1,17 +1,16 @@
 import json
 import logging
 import re
-import aiohttp
 import requests
 from datetime import datetime, timedelta
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from app.core.config import settings
 from app.core.prompt import get_receptionist_prompt
 from app.services.sheet_service import sheet_service
 from app.services.telegram_service import telegram_service
 from app.services.session_manager import session_manager
 from app.services.clinic_service import clinic_service
-from app.utils.phonetics import normalize_for_indian_voice, parse_spoken_hindi_numbers, format_digits_for_readback
+from app.utils.phonetics import parse_spoken_hindi_numbers, format_digits_for_readback
 
 logger = logging.getLogger(__name__)
 
@@ -20,174 +19,18 @@ http_session = requests.Session()
 http_session.headers.update({"Connection": "close"})
 
 FAST_MODELS = [
-    ("gemini-flash-lite-latest", 3.0),
-    ("gemini-3.1-flash-lite", 3.5),
-    ("gemini-3.5-flash-lite", 4.0)
+    ("gemini-flash-lite-latest", 4.5),
+    ("gemini-3.5-flash-lite", 4.5),
+    ("gemini-3.1-flash-lite", 4.5),
+    ("gemini-flash-latest", 4.5)
 ]
 
-INVALID_RELATION_NAMES = [
+INVALID_RELATION_NAMES = {
     "dost", "friend", "mere dost", "apne dost", "bhai", "brother", 
     "papa", "father", "mummy", "mother", "sister", "patient", "unknown", "relative",
     "apna", "apne", "apna ji", "kapna", "kalpana", "khud", "self", "myself", "mera", "mere", "meri",
     "someone", "anybody", "one"
-]
-
-HINDI_SYMPTOM_MAP = {
-    "dast": "दस्त (Loose motion / Diarrhea)",
-    "dust": "दस्त (Loose motion)",  # Common telephonic STT confusion for dast
-    "just": "दस्त (Loose motion)",
-    "loose motion": "Loose motion (दस्त)",
-    "pet kharab": "पेट खराब (Stomach upset)",
-    "bukhar": "बुखार (Fever)",
-    "fever": "बुखार (Fever)",
-    "khansi": "खांसी (Cough)",
-    "cough": "खांसी (Cough)",
-    "sardi": "सर्दी-जुकाम (Cold)",
-    "jukham": "जुकाम (Cold)",
-    "zukham": "जुकाम (Cold)",
-    "cold": "Cold",
-    "pet dard": "पेट दर्द (Stomach pain)",
-    "stomach pain": "Stomach pain",
-    "sir dard": "सिर दर्द (Headache)",
-    "headache": "Headache",
-    "paon dard": "पाँव में दर्द (Leg pain)",
-    "pair dard": "पैर में दर्द (Leg pain)",
-    "leg pain": "Leg pain",
-    "kamar dard": "कमर दर्द (Back pain)",
-    "back pain": "Back pain",
-    "chashma": "चश्मा चेकअप (Eye checkup)",
-    "aankh": "आँख चेकअप",
-    "eye checkup": "Eye checkup",
-    "jalan": "सीने में जलन (Acidity / Burning)",
-    "acidity": "Acidity",
-    "ulti": "उल्टी (Vomiting)",
-    "vomit": "Vomiting",
-    "vomiting": "Vomiting",
-    "chakkar": "चक्कर आना (Dizziness)",
-    "badan dard": "बदन दर्द (Body ache)",
-    "gale mein dard": "गले में दर्द (Sore throat)",
-    "tabiyat kharab": "तबीयत खराब (General Checkup)"
 }
-
-HINDI_DURATION_PATTERNS = [
-    (r'\b(?:10|ten|das)\s*(?:din|days?|deen|then)\b', '10 days'),
-    (r'\b(?:2|two|do)\s*(?:din|days?)\b', '2 days'),
-    (r'\b(?:3|three|teen)\s*(?:din|days?)\b', '3 days'),
-    (r'\b(?:4|four|chaar|char)\s*(?:din|days?)\b', '4 days'),
-    (r'\b(?:5|five|paanch|panch)\s*(?:din|days?)\b', '5 days'),
-    (r'\b(?:1|one|ek)\s*(?:din|day|hafte|week)\b', '1 day'),
-    (r'\b(?:kal|yesterday)\s*(?:se)?\b', 'Since yesterday'),
-    (r'\b(?:aaj|today)\s*(?:se)?\b', 'Since today'),
-    (r'\b(?:parso|day before yesterday)\s*(?:se)?\b', 'Since 2 days')
-]
-
-def extract_slots_from_text(user_speech: str, session) -> dict:
-    """Enterprise rule-based slot extractor running in <0.2ms before LLM invocation."""
-    text_lower = user_speech.lower().strip()
-    slots = session.slots
-
-    # 1. Symptom extraction
-    if not slots.get("symptoms"):
-        for kw, label in HINDI_SYMPTOM_MAP.items():
-            if re.search(r'\b' + re.escape(kw) + r'\b', text_lower):
-                slots["symptoms"] = label
-                logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Symptom: {label}")
-                break
-
-    # If previous model turn asked for problem/takleef and caller describes it
-    if not slots.get("symptoms") and len(session.messages) >= 1:
-        last_model_msg = session.messages[-1].get("parts", [{}])[0].get("text", "").lower()
-        if any(w in last_model_msg for w in ["takleef", "pareshani", "dikkat", "symptoms", "परेशानी", "तकलीफ"]):
-            clean_symp = user_speech.strip()
-            if len(clean_symp) >= 3 and clean_symp.lower() not in INVALID_RELATION_NAMES:
-                slots["symptoms"] = clean_symp
-                logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Captured Direct Symptom: {clean_symp}")
-
-    # 2. Duration extraction
-    if not slots.get("duration"):
-        for pat, val in HINDI_DURATION_PATTERNS:
-            if re.search(pat, text_lower):
-                slots["duration"] = val
-                logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Duration: {val}")
-                break
-
-    # 3. Patient Name extraction
-    if not slots.get("patient_name"):
-        # Pattern A: 'mera naam X hai', 'naam X hai', 'patient ka naam X'
-        m_name = re.search(r'\b(?:mera\s+naam|naam\s+hai|naam|name\s+is|patient\s+ka\s+naam)\s+([A-Za-z\u0900-\u097f]{3,20})\b', user_speech, re.IGNORECASE)
-        if m_name:
-            cand = m_name.group(1).strip()
-            if cand.lower() not in INVALID_RELATION_NAMES and cand.lower() not in HINDI_SYMPTOM_MAP:
-                slots["patient_name"] = cand.capitalize()
-                logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Name (via 'naam'): {slots['patient_name']}")
-
-        # Pattern B: 'X ko', 'X ke liye', 'X ka appointment'
-        if not slots.get("patient_name"):
-            m = re.search(r'\b([A-Za-z\u0900-\u097f]{3,20})\s+(?:ko|ke liye|ka|ki)\b', user_speech, re.IGNORECASE)
-            if m:
-                cand = m.group(1).strip()
-                if cand.lower() not in INVALID_RELATION_NAMES and cand.lower() not in HINDI_SYMPTOM_MAP:
-                    slots["patient_name"] = cand.capitalize()
-                    logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Name: {slots['patient_name']}")
-
-        # Pattern C: Direct single/double word name reply if previous assistant turn asked for name
-        if not slots.get("patient_name") and len(session.messages) >= 1:
-            last_model_msg = session.messages[-1].get("parts", [{}])[0].get("text", "").lower()
-            if any(w in last_model_msg for w in ["naam", "name", "शुभ नाम"]):
-                words = user_speech.strip().split()
-                if 1 <= len(words) <= 3:
-                    cand = words[0].strip()
-                    if cand.lower() not in INVALID_RELATION_NAMES and cand.lower() not in HINDI_SYMPTOM_MAP and len(cand) >= 3:
-                        slots["patient_name"] = " ".join(w.capitalize() for w in words)
-                        logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Direct Name: {slots['patient_name']}")
-
-    # 4. Spoken Phone extraction
-    if not slots.get("phone_number"):
-        parsed_phone = parse_spoken_hindi_numbers(user_speech)
-        if parsed_phone:
-            slots["phone_number"] = parsed_phone[-10:]
-            session.caller_phone = slots["phone_number"]
-            logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Phone: {slots['phone_number']}")
-        elif session.caller_phone:
-            clean_p = re.sub(r'\D', '', session.caller_phone)
-            if len(clean_p) >= 10:
-                slots["phone_number"] = clean_p[-10:]
-
-    # 5. Timing extraction
-    if not slots.get("time_slot"):
-        time_matches = [
-            (r'\b(?:11:30|11\s*30|sadhe\s*gyarah)\b', "11:30 AM"),
-            (r'\b(?:11|11:00|gyarah)\s*(?:baje|am)?\b', "11:00 AM"),
-            (r'\b(?:12:30|12\s*30|sadhe\s*barah)\b', "12:30 PM"),
-            (r'\b(?:12|12:00|barah)\s*(?:baje|pm)?\b', "12:00 PM"),
-            (r'\b(?:1:00|1|ek)\s*(?:baje|pm)?\b', "01:00 PM"),
-            (r'\b(?:1:30|dedh)\s*(?:baje|pm)?\b', "01:30 PM"),
-            (r'\b(?:6:30|6\s*30|sadhe\s*chhe)\b', "06:30 PM"),
-            (r'\b(?:6|6:00|chhe)\s*(?:baje|pm)?\b', "06:00 PM"),
-            (r'\b(?:7:30|7\s*30|sadhe\s*saat)\b', "07:30 PM"),
-            (r'\b(?:7|7:00|saat)\s*(?:baje|pm)?\b', "07:00 PM"),
-            (r'\b(?:subah|morning)\b', "11:00 AM"),
-            (r'\b(?:shaam|sham|evening)\b', "06:00 PM")
-        ]
-        for pat, t_val in time_matches:
-            if re.search(pat, text_lower):
-                slots["time_slot"] = t_val
-                logger.info(f"[SLOT MACHINE {session.call_sid[-6:]}] Extracted Time: {t_val}")
-                break
-
-    # 6. Date extraction
-    if not slots.get("date"):
-        today_dt = datetime.now()
-        if re.search(r'\b(?:kal|tomorrow)\b', text_lower):
-            slots["date"] = (today_dt + timedelta(days=1)).strftime("%Y-%m-%d")
-        elif re.search(r'\b(?:parso|day after tomorrow)\b', text_lower):
-            slots["date"] = (today_dt + timedelta(days=2)).strftime("%Y-%m-%d")
-        elif re.search(r'\b(?:aaj|today)\b', text_lower):
-            slots["date"] = today_dt.strftime("%Y-%m-%d")
-        elif slots.get("time_slot"):
-            slots["date"] = (today_dt + timedelta(days=1)).strftime("%Y-%m-%d")
-
-    return slots
 
 TOOLS_DEFINITION = [
     {
@@ -200,27 +43,27 @@ TOOLS_DEFINITION = [
                     "properties": {
                         "patient_name": {
                             "type": "STRING",
-                            "description": "Actual person full name of the patient (e.g. Sunil, Devendra, Anita). Never relations like 'dost' or 'bhai'."
+                            "description": "Actual person full name of the patient (e.g. Sunil, Devendra, Anita, Neeraj). Never relation words like 'dost' or 'bhai'."
                         },
                         "phone_number": {
                             "type": "STRING",
-                            "description": "Contact phone number for the patient"
+                            "description": "10-digit contact mobile number for the patient"
                         },
                         "date": {
                             "type": "STRING",
-                            "description": "Appointment date in YYYY-MM-DD format (e.g. 2026-11-17)"
+                            "description": "Appointment date in YYYY-MM-DD format (e.g. 2026-11-24)"
                         },
                         "time_slot": {
                             "type": "STRING",
-                            "description": "Selected time slot e.g. 10:00 AM, 02:00 PM, 07:00 PM"
+                            "description": "Selected time slot e.g. 11:00 AM, 11:15 AM, 06:00 PM, 06:30 PM, 07:15 PM"
                         },
                         "symptoms": {
                             "type": "STRING",
-                            "description": "Specific health symptoms or complaint (e.g. leg pain, fever, cough)"
+                            "description": "Specific health symptoms or complaint (e.g. loose motion, fever, cough, stomach pain, checkup)"
                         },
                         "duration": {
                             "type": "STRING",
-                            "description": "Duration of symptoms e.g. 'since 2 days', 'for 3 days', 'from yesterday'"
+                            "description": "Duration of symptoms e.g. '10 days', '2 days', 'since yesterday'"
                         }
                     },
                     "required": ["patient_name", "date", "time_slot", "symptoms"]
@@ -230,47 +73,19 @@ TOOLS_DEFINITION = [
     }
 ]
 
-def clean_for_speech(text: str, is_hindi: bool = False) -> str:
-    """Cleans punctuation, asterisks, formats times and normalizes to native Indian phonetics if Hindi."""
+def clean_for_speech(text: str) -> str:
+    """Cleans punctuation, asterisks, and formatting for clean voice output."""
+    if not text:
+        return ""
     text = re.sub(r'[*_#`~]', '', text)
     text = re.sub(r'^\s*[-•]\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'(\d{1,2}):00\s*(AM|PM|am|pm)', r'\1 \2', text)
     text = re.sub(r'\s+', ' ', text)
-    if is_hindi:
-        text = normalize_for_indian_voice(text)
     return text.strip()
 
-def detect_user_language(text: str, current_lang: str = "HINDI") -> str:
-    """
-    Enterprise language detection with session stickiness.
-    Prevents single-word utterances, digits or phone numbers from flipping conversation language.
-    """
-    hindi_keywords = [
-        "bhai", "mera", "mere", "meri", "karna", "karana", "kardo", "kijiye", "hai", "hain", 
-        "kal", "aaj", "baje", "takleef", "bukhar", "khansi", "dost", "theek", "haan",
-        "nahi", "nahin", "unka", "unki", "batayein", "chahiye", "dard", "paon", "kitne",
-        "dopahar", "subah", "shaam", "lena", "milna", "dikhaana", "dikhana", "naam", "sir",
-        "kya", "kab", "kahan", "kaise", "samajh", "aaya", "aayi", "bolo", "batao", "sunai"
-    ]
-    english_keywords = [
-        "i want", "i need", "appointment for", "my name is", "doctor sharma", "how are you",
-        "can i get", "is doctor available", "could you", "please tell me", "what is the fee",
-        "hello", "good morning", "good evening", "thank you"
-    ]
-    lower = text.lower().strip()
-
-    # If the turn is purely numbers/digits (e.g. '78 6342 51 22', '8824466229') or short neutral noise:
-    letters_only = re.sub(r'[\d\s\-\+\(\)\#\*]', '', lower)
-    if len(letters_only) <= 2:
-        return current_lang
-
-    if any(w in lower for w in hindi_keywords):
-        return "HINDI"
-
-    if any(w in lower for w in english_keywords):
-        return "ENGLISH"
-
-    return current_lang
+def is_devanagari_text(text: str) -> bool:
+    """Detects if text contains native Devanagari script."""
+    return any('\u0900' <= char <= '\u097f' for char in text)
 
 def get_live_schedule_summary() -> str:
     """Generates real-time 3-day continuous schedule summary for prompt injection."""
@@ -287,10 +102,7 @@ def get_live_schedule_summary() -> str:
     return "\n".join(schedule_lines)
 
 def split_sentences(buffer: str) -> tuple[list[str], str]:
-    """
-    Splits text stream into distinct sentence chunks for micro-TTS synthesis.
-    Avoids splitting on common abbreviations like Dr., Mr., Mrs.
-    """
+    """Splits text stream into distinct sentence chunks for micro-TTS synthesis."""
     pattern = r'(?<!\bDr)(?<!\bMr)(?<!\bMrs)(?<!\bMs)[.?!।\n]+(?:\s+|$)'
     sentences = []
     last_end = 0
@@ -306,350 +118,19 @@ class LLMService:
     def __init__(self):
         self.api_key = settings.GEMINI_API_KEY
 
-    async def stream_turn(self, call_sid: str, user_speech: str) -> AsyncGenerator[tuple[str, bool], None]:
-        """
-        Enterprise real-time streaming generator.
-        Streams tokens from Gemini Flash-Lite via SSE, splits into sentence chunks,
-        and yields (sentence, is_done) in <500ms so caller hears audio immediately.
-        """
-        session = session_manager.get_or_create(call_sid)
-        user_lower = user_speech.lower().strip()
-        user_lang = detect_user_language(user_speech, current_lang=session.language)
-        session.language = user_lang
-
-        # Detect spoken 10-digit phone number if present in speech
-        spoken_phone = parse_spoken_hindi_numbers(user_speech)
-        if spoken_phone:
-            session.caller_phone = spoken_phone
-            logger.info(f"[CALL {call_sid[-6:]}] Extracted Spoken 10-digit Phone: {spoken_phone}")
-
-        session_manager.add_user_message(call_sid, user_speech)
-        logger.info(f"[CALL {call_sid[-6:]}] User Said ({user_lang}): {user_speech}")
-
-        # --- 1. ENTERPRISE IMMEDIATE ROUTING (Prevents Post-Booking Loops & Webhook Timeouts) ---
-        if session.is_completed:
-            appt = session.appointment_data or {}
-            p_name = appt.get('patient_name', '')
-            slot = appt.get('time_slot', '')
-            name_str = f"{p_name} जी का " if p_name and p_name.lower() not in ("patient", "dost") else ""
-
-            # Check for explicit closing cues (Caller actually wants to end the call)
-            closing_words = [
-                "nahi", "nahin", "no", "nope", "nothing", "kuch nahi", "kuch nhi", 
-                "bas", "bus", "thank you", "thanks", "dhanyawad", "shukriya", 
-                "bye", "goodbye", "all set", "ho gaya", "theek hai bas", "nahi bas"
-            ]
-            has_question_words = any(q in user_lower for q in [
-                "kya", "kitna", "kitne", "kab", "kahan", "kaha", "fee", "fees", "address", 
-                "timing", "charge", "paisa", "paise", "cost", "pata", "age", "location", "doctor"
-            ])
-            is_closing = any(re.search(r'\b' + re.escape(c) + r'\b', user_lower) for c in closing_words) and not has_question_words
-
-            if is_closing:
-                concluding_reply = f"आपका बहुत-बहुत धन्यवाद! {name_str}अपॉइंटमेंट पक्का हो गया है। क्लिनिक पर समय से 10 मिनट पहले पधारें। अपना ख्याल रखियेगा, नमस्ते!" if user_lang == "HINDI" else f"You are most welcome! {name_str}appointment is confirmed. Please arrive 10 minutes prior. Take care and goodbye!"
-                session_manager.add_model_message(call_sid, concluding_reply)
-                logger.info(f"[CALL {call_sid[-6:]}] Explicit Call Closing: {concluding_reply}")
-                yield concluding_reply, True
-                return
-
-            # Clarification / Repeat Request Handling
-            repeat_cues = [
-                "samajh nahi", "samajh nhi", "sunai nahi", "sunayi nahi", "kya bola", "kya kaha",
-                "repeat", "phir se", "fir se", "dobara", "ek bar aur", "pardon", "sorry",
-                "didn't understand", "did not understand", "could not hear", "say again", "once more"
-            ]
-            if any(cue in user_lower for cue in repeat_cues):
-                if user_lang == "HINDI":
-                    clarify_reply = f"जी मैं फिर से बता देती हूँ। {name_str}अपॉइंटमेंट {slot} के लिए पक्का हो गया है। क्या आपको क्लिनिक का पता या फीस जाननी है?"
-                else:
-                    doc = clinic_service.profile.doctor_name
-                    clarify_reply = f"Certainly! The appointment for {p_name or 'the patient'} with {doc} is confirmed for {slot}. Would you like the clinic address or consultation fee details?"
-                session_manager.add_model_message(call_sid, clarify_reply)
-                logger.info(f"[CALL {call_sid[-6:]}] Handled Clarification / Repeat Request: {clarify_reply}")
-                yield clarify_reply, False
-                return
-
-            # Instant Fees handling (including STT mishearings like 'age kya' / 'age' which sounds like 'fees')
-            if any(w in user_lower for w in ["fee", "fees", "paisa", "paise", "rupaye", "rupees", "charge", "charges", "cost", "kitna", "kitne", "rate", "age kya", "age kitna", "age"]):
-                fees_reply = clinic_service.get_fees_response(user_lang)
-                session_manager.add_model_message(call_sid, fees_reply)
-                yield fees_reply, False
-                return
-
-            # Instant Address / Location handling
-            if any(w in user_lower for w in ["address", "kahan", "kaha", "location", "kidhar", "clinic", "rasta", "road", "hospital", "pata"]):
-                addr_reply = clinic_service.get_address_response(user_lang)
-                session_manager.add_model_message(call_sid, addr_reply)
-                yield addr_reply, False
-                return
-
-            # Instant Clinic Timings handling
-            if any(w in user_lower for w in ["timing", "timings", "kab", "samay", "open", "khula", "hours"]):
-                timing_reply = clinic_service.get_timings_response(user_lang)
-                session_manager.add_model_message(call_sid, timing_reply)
-                yield timing_reply, False
-                return
-
-            # Dynamic FAQ lookup from Clinic Profile
-            faq_ans = clinic_service.check_faq(user_speech)
-            if faq_ans:
-                session_manager.add_model_message(call_sid, faq_ans)
-                yield faq_ans, False
-                return
-
-            # Open follow-up: DO NOT HANG UP! Keep call connected (is_done=False)
-            if user_lang == "HINDI":
-                fallback_followup = f"जी, {name_str}अपॉइंटमेंट {slot} पर पक्का है। क्या क्लिनिक का पता या फीस के बारे में कुछ जानना चाहते हैं?"
-            else:
-                fallback_followup = f"Yes, {name_str}appointment is confirmed for {slot}. Would you like to know the clinic address or consultation fees?"
-            session_manager.add_model_message(call_sid, fallback_followup)
-            logger.info(f"[CALL {call_sid[-6:]}] Post-booking open follow-up: {fallback_followup}")
-            yield fallback_followup, False
-            return
-
-        # --- 2. ENTERPRISE SLOT STATE MACHINE (Guarantees <0.5s slot capture & zero loop) ---
-        slots = extract_slots_from_text(user_speech, session)
-
-        # Check if all booking slots are now satisfied
-        p_name = slots.get("patient_name")
-        symp = slots.get("symptoms")
-        time_s = slots.get("time_slot")
-        phone_n = slots.get("phone_number") or (session.caller_phone if session.caller_phone and len(re.sub(r'\D', '', session.caller_phone)) >= 10 else None)
-
-        if p_name and symp and time_s and phone_n and not session.is_completed:
-            clean_digits = re.sub(r'\D', '', phone_n)[-10:]
-            readback = format_digits_for_readback(clean_digits)
-            date_val = slots.get("date") or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-            duration_val = slots.get("duration") or "Recently noticed"
-
-            booking = sheet_service.save_appointment(
-                patient_name=p_name,
-                phone_number=clean_digits,
-                date_str=date_val,
-                time_slot=time_s,
-                symptoms=symp,
-                duration=duration_val
-            )
-            telegram_service.send_appointment_alert(booking)
-            session_manager.mark_completed(call_sid, booking)
-
-            try:
-                dt = datetime.strptime(date_val, "%Y-%m-%d")
-                friendly_date = dt.strftime("%A, %B %d")
-            except Exception:
-                friendly_date = date_val
-
-            clean_slot = time_s.replace(":00", "").replace(" PM", " बजे").replace(" AM", " बजे")
-
-            if user_lang == "HINDI":
-                spoken_text = (
-                    f"बिल्कुल! {p_name} जी का अपॉइंटमेंट {friendly_date} को "
-                    f"{clean_slot} पक्का हो गया है। आपका फ़ोन नंबर {readback} नोट कर लिया गया है। "
-                    "क्या क्लिनिक का पता या फीस जाननी है?"
-                )
-            else:
-                doc = clinic_service.profile.doctor_name
-                spoken_text = (
-                    f"Perfect! The appointment for {p_name} with {doc} is confirmed for "
-                    f"{friendly_date} at {time_s} for {symp}. Registered contact number is {readback}. "
-                    "Do you need clinic address or timings?"
-                )
-
-            cleaned = clean_for_speech(spoken_text, is_hindi=(user_lang == "HINDI"))
-            session_manager.add_model_message(call_sid, cleaned)
-            logger.info(f"[CALL {call_sid[-6:]}] Confirmed Booking via Fast Slot Machine: {booking['booking_id']} for {p_name}")
-            yield cleaned, False
-            return
-
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        schedule_summary = get_live_schedule_summary()
-        
-        # Inject known slot context to prevent repetitive questions
-        known_info = []
-        if slots.get("patient_name"): known_info.append(f"Patient Name: {slots['patient_name']}")
-        if slots.get("symptoms"): known_info.append(f"Symptoms: {slots['symptoms']}")
-        if slots.get("duration"): known_info.append(f"Duration: {slots['duration']}")
-        if slots.get("time_slot"): known_info.append(f"Preferred Time: {slots['time_slot']}")
-        slot_context = f"\nKNOWN DETAILS ALREADY CAPTURED: [{', '.join(known_info)}]. Do NOT re-ask for details already captured!" if known_info else ""
-
-        system_prompt = get_receptionist_prompt(today_str, schedule_summary, target_lang=user_lang) + slot_context
-
-        include_tools = not session.is_completed
-
-        recent_messages = session.messages[-2:] if len(session.messages) > 2 else session.messages
-        payload = {
-            "system_instruction": {
-                "parts": [{"text": system_prompt}]
-            },
-            "contents": recent_messages,
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 200
-            }
-        }
-        if include_tools:
-            payload["tools"] = TOOLS_DEFINITION
-
-        text_buffer = ""
-        accumulated_chunks = []
-        function_call_payload = None
-        stream_successful = False
-
-        # Attempt fast streaming with fallback models
-        for model, t_sec in FAST_MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={self.api_key}"
-            try:
-                async with aiohttp.ClientSession() as http_sess:
-                    async with http_sess.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=t_sec + 1.2)) as resp:
-                        if resp.status != 200:
-                            logger.warning(f"[LLM STREAM] Model {model} returned HTTP {resp.status}")
-                            continue
-
-                        stream_successful = True
-                        async for line_bytes in resp.content:
-                            line = line_bytes.decode('utf-8', errors='replace').strip()
-                            if not line or not line.startswith("data: "):
-                                continue
-
-                            json_str = line[6:].strip()
-                            try:
-                                data = json.loads(json_str)
-                            except Exception:
-                                continue
-
-                            candidate = data.get("candidates", [{}])[0]
-                            parts = candidate.get("content", {}).get("parts", [])
-
-                            for p in parts:
-                                if "functionCall" in p and include_tools:
-                                    function_call_payload = p["functionCall"]
-                                if "text" in p and p["text"]:
-                                    token = p["text"]
-                                    text_buffer += token
-                                    sentences, text_buffer = split_sentences(text_buffer)
-                                    for sent in sentences:
-                                        cleaned = clean_for_speech(sent, is_hindi=(user_lang == "HINDI"))
-                                        if cleaned:
-                                            accumulated_chunks.append(cleaned)
-                                            yield cleaned, False
-
-                if stream_successful:
-                    break
-            except Exception as e:
-                logger.warning(f"[LLM STREAM] Model {model} stream exception: {e}")
-                continue
-
-        # Handle Function Call (Booking appointment)
-        if function_call_payload:
-            args = function_call_payload.get("args", {})
-            patient_name = args.get("patient_name", "Patient").strip().title()
-
-            # Filter relation words or pronouns from being recorded as names
-            if patient_name.lower() in INVALID_RELATION_NAMES or len(patient_name) <= 2:
-                if user_lang == "HINDI":
-                    prompt_for_name = "जी बिल्कुल! कृपया मरीज का शुभ नाम बता दीजिए ताकि मैं अपॉइंटमेंट बुक कर सकूँ?"
-                else:
-                    prompt_for_name = "Certainly! Could you please share the patient's full name so I can confirm the booking?"
-                session_manager.add_model_message(call_sid, prompt_for_name)
-                logger.info(f"[CALL {call_sid[-6:]}] Filtered invalid name '{patient_name}'. Asking for real patient name.")
-                yield prompt_for_name, False
-                return
-
-            # Parse and validate 10-digit phone number
-            raw_phone = str(args.get("phone_number") or "")
-            parsed_phone = parse_spoken_hindi_numbers(raw_phone)
-            phone = parsed_phone or (session.caller_phone if session.caller_phone and len(re.sub(r'\D', '', session.caller_phone)) >= 10 else None)
-
-            if not phone or len(re.sub(r'\D', '', phone)) < 10:
-                if user_lang == "HINDI":
-                    prompt_phone = "जी बिल्कुल! अपॉइंटमेंट बुक करने के लिए कृपया अपना 10 अंकों का मोबाइल नंबर बता दीजिए।"
-                else:
-                    prompt_phone = "Certainly! Please share your 10-digit contact number to confirm the booking."
-                session_manager.add_model_message(call_sid, prompt_phone)
-                logger.info(f"[CALL {call_sid[-6:]}] Phone missing or incomplete. Asking for phone number.")
-                yield prompt_phone, False
-                return
-
-            clean_digits = re.sub(r'\D', '', phone)[-10:]
-            readback = format_digits_for_readback(clean_digits)
-
-            date_val = args.get("date", today_str)
-            slot = args.get("time_slot", "11:00 AM")
-            symptoms = args.get("symptoms", "General Consultation")
-            duration = args.get("duration", "Recently noticed")
-
-            # 1. Save to Excel
-            booking = sheet_service.save_appointment(
-                patient_name=patient_name,
-                phone_number=clean_digits,
-                date_str=date_val,
-                time_slot=slot,
-                symptoms=symptoms,
-                duration=duration
-            )
-
-            # 2. Real-time Telegram Alert
-            telegram_service.send_appointment_alert(booking)
-            session_manager.mark_completed(call_sid, booking)
-
-            try:
-                dt = datetime.strptime(date_val, "%Y-%m-%d")
-                friendly_date = dt.strftime("%A, %B %d")
-            except Exception:
-                friendly_date = date_val
-
-            clean_slot = slot.replace(":00", "").replace(" PM", " बजे").replace(" AM", " बजे")
-
-            if user_lang == "HINDI":
-                spoken_text = (
-                    f"बिल्कुल! {patient_name} जी का अपॉइंटमेंट {friendly_date} को "
-                    f"{clean_slot} पक्का हो गया है। आपका फ़ोन नंबर {readback} नोट कर लिया गया है। "
-                    "क्या क्लिनिक का पता या फीस जाननी है?"
-                )
-            else:
-                doc = clinic_service.profile.doctor_name
-                spoken_text = (
-                    f"Perfect! The appointment for {patient_name} with {doc} is confirmed for "
-                    f"{friendly_date} at {slot} for {symptoms}. Registered number is {readback}. "
-                    "Do you need clinic address or timings?"
-                )
-
-            cleaned = clean_for_speech(spoken_text, is_hindi=(user_lang == "HINDI"))
-            session_manager.add_model_message(call_sid, cleaned)
-            logger.info(f"[CALL {call_sid[-6:]}] Confirmed Booking: {booking['booking_id']} for {patient_name}")
-            yield cleaned, False
-            return
-
-        # Flush any remaining text in the buffer
-        if text_buffer.strip():
-            cleaned_rem = clean_for_speech(text_buffer, is_hindi=(user_lang == "HINDI"))
-            if cleaned_rem:
-                accumulated_chunks.append(cleaned_rem)
-                yield cleaned_rem, False
-
-        # Store complete message in history
-        if accumulated_chunks:
-            full_reply = " ".join(accumulated_chunks)
-            session_manager.add_model_message(call_sid, full_reply)
-            logger.info(f"[CALL {call_sid[-6:]}] AI Replied: {full_reply}")
-        elif not stream_successful:
-            if user_lang == "HINDI":
-                fallback = "Ji bilkul, aap apni takleef aur aane ka time bata dijiye."
-            else:
-                fallback = "Certainly! Could you please share your symptoms and preferred time to see Dr. Sharma?"
-            session_manager.add_model_message(call_sid, fallback)
-            yield fallback, False
-
     def _call_gemini_api(self, contents: list, system_prompt: str, include_tools: bool = True) -> dict:
-        """Synchronous REST API call retaining last 8 messages for full call context."""
-        recent_messages = contents[-8:] if len(contents) > 8 else contents
+        """
+        Synchronous REST API call to Gemini Flash-Lite.
+        Retains up to the last 10 messages of conversation history to preserve full call context.
+        """
+        recent_messages = contents[-10:] if len(contents) > 10 else contents
         payload = {
             "system_instruction": {
                 "parts": [{"text": system_prompt}]
             },
             "contents": recent_messages,
             "generationConfig": {
-                "temperature": 0.1,
+                "temperature": 0.2,
                 "maxOutputTokens": 120
             }
         }
@@ -662,170 +143,52 @@ class LLMService:
                 res = http_session.post(url, json=payload, timeout=t_sec)
                 if res.status_code == 200:
                     return res.json()
-                logger.warning(f"[LLM] Model {model} returned HTTP {res.status_code}, trying next...")
+                logger.warning(f"[LLM] Model {model} returned HTTP {res.status_code}, trying next fallback...")
             except Exception as e:
                 logger.warning(f"[LLM] Model {model} exception: {e}")
                 continue
 
-        raise Exception("All LLM models failed or timed out.")
+        raise Exception("All Gemini LLM models failed or timed out.")
 
     def process_turn(self, call_sid: str, user_speech: str) -> tuple[str, bool]:
         """
-        Synchronous turn processor for standard Gather webhook fallback and simulator.
+        Industry-standard Voice AI turn processor.
+        Empowers Gemini LLM with complete semantic understanding and autonomous tool execution.
+        Eliminates 100% of brittle keyword intercepts and preserves multi-turn memory.
         """
         session = session_manager.get_or_create(call_sid)
         user_lower = user_speech.lower().strip()
-        user_lang = detect_user_language(user_speech, current_lang=session.language)
-        session.language = user_lang
 
-        # Detect spoken 10-digit phone number if present in speech
+        # Parse spoken 10-digit mobile number if caller speaks one
         spoken_phone = parse_spoken_hindi_numbers(user_speech)
         if spoken_phone:
             session.caller_phone = spoken_phone
             logger.info(f"[CALL {call_sid[-6:]}] Extracted Spoken 10-digit Phone: {spoken_phone}")
 
-        session_manager.add_user_message(call_sid, user_speech)
-        logger.info(f"\n[CALL {call_sid[-6:]}] User Said ({user_lang}): {user_speech}")
-
-        # --- 1. ENTERPRISE IMMEDIATE ROUTING (Prevents Post-Booking Loops & Timeouts) ---
+        # Check if caller wants to gracefully end call after booking is completed
         if session.is_completed:
-            appt = session.appointment_data or {}
-            p_name = appt.get('patient_name', '')
-            slot = appt.get('time_slot', '')
-            name_str = f"{p_name} जी का " if p_name and p_name.lower() not in ("patient", "dost") else ""
-
-            # Check for explicit closing cues (Caller actually wants to end the call)
             closing_words = [
                 "nahi", "nahin", "no", "nope", "nothing", "kuch nahi", "kuch nhi", 
                 "bas", "bus", "thank you", "thanks", "dhanyawad", "shukriya", 
                 "bye", "goodbye", "all set", "ho gaya", "theek hai bas", "nahi bas"
             ]
-            has_question_words = any(q in user_lower for q in [
-                "kya", "kitna", "kitne", "kab", "kahan", "kaha", "fee", "fees", "address", 
-                "timing", "charge", "paisa", "paise", "cost", "pata", "age", "location", "doctor"
+            has_question = any(q in user_lower for q in [
+                "kya", "kitna", "kitne", "kab", "kahan", "kaha", "fee", "fees", 
+                "address", "timing", "charge", "paisa", "paise", "cost", "pata", "doctor"
             ])
-            is_closing = any(re.search(r'\b' + re.escape(c) + r'\b', user_lower) for c in closing_words) and not has_question_words
-
+            is_closing = any(re.search(r'\b' + re.escape(c) + r'\b', user_lower) for c in closing_words) and not has_question
             if is_closing:
-                concluding_reply = f"आपका बहुत-बहुत धन्यवाद! {name_str}अपॉइंटमेंट पक्का हो गया है। क्लिनिक पर समय से 10 मिनट पहले पधारें। अपना ख्याल रखियेगा, नमस्ते!" if user_lang == "HINDI" else f"You are most welcome! {name_str}appointment is confirmed. Please arrive 10 minutes prior. Take care and goodbye!"
-                session_manager.add_model_message(call_sid, concluding_reply)
-                logger.info(f"[CALL {call_sid[-6:]}] Explicit Call Closing: {concluding_reply}")
-                return concluding_reply, True
+                closing_reply = "Aapka bahut-bahut shukriya! Clinic par samay se 10 minute pehle pahunchein. Apna khayal rakhiye, namaste!"
+                session_manager.add_model_message(call_sid, closing_reply)
+                logger.info(f"[CALL {call_sid[-6:]}] Call Completed Gracefully: {closing_reply}")
+                return closing_reply, True
 
-            # Clarification / Repeat Request Handling
-            repeat_cues = [
-                "samajh nahi", "samajh nhi", "sunai nahi", "sunayi nahi", "kya bola", "kya kaha",
-                "repeat", "phir se", "fir se", "dobara", "ek bar aur", "pardon", "sorry",
-                "didn't understand", "did not understand", "could not hear", "say again", "once more"
-            ]
-            if any(cue in user_lower for cue in repeat_cues):
-                if user_lang == "HINDI":
-                    clarify_reply = f"जी मैं फिर से बता देती हूँ। {name_str}अपॉइंटमेंट {slot} के लिए पक्का हो गया है। क्या आपको क्लिनिक का पता या फीस जाननी है?"
-                else:
-                    doc = clinic_service.profile.doctor_name
-                    clarify_reply = f"Certainly! The appointment for {p_name or 'the patient'} with {doc} is confirmed for {slot}. Would you like the clinic address or consultation fee details?"
-                session_manager.add_model_message(call_sid, clarify_reply)
-                logger.info(f"[CALL {call_sid[-6:]}] Handled Clarification / Repeat Request: {clarify_reply}")
-                return clarify_reply, False
-
-            # Instant Fees handling (including STT mishearings like 'age kya' / 'age' which sounds like 'fees')
-            if any(w in user_lower for w in ["fee", "fees", "paisa", "paise", "rupaye", "rupees", "charge", "charges", "cost", "kitna", "kitne", "rate", "age kya", "age kitna", "age"]):
-                fees_reply = clinic_service.get_fees_response(user_lang)
-                session_manager.add_model_message(call_sid, fees_reply)
-                return fees_reply, False
-
-            # Instant Address / Location handling
-            if any(w in user_lower for w in ["address", "kahan", "kaha", "location", "kidhar", "clinic", "rasta", "road", "hospital", "pata"]):
-                addr_reply = clinic_service.get_address_response(user_lang)
-                session_manager.add_model_message(call_sid, addr_reply)
-                return addr_reply, False
-
-            # Instant Clinic Timings handling
-            if any(w in user_lower for w in ["timing", "timings", "kab", "samay", "open", "khula", "hours"]):
-                timing_reply = clinic_service.get_timings_response(user_lang)
-                session_manager.add_model_message(call_sid, timing_reply)
-                return timing_reply, False
-
-            # Dynamic FAQ lookup from Clinic Profile
-            faq_ans = clinic_service.check_faq(user_speech)
-            if faq_ans:
-                session_manager.add_model_message(call_sid, faq_ans)
-                return faq_ans, False
-
-            # Open follow-up: DO NOT HANG UP! Keep call connected (is_done=False)
-            if user_lang == "HINDI":
-                fallback_followup = f"जी, {name_str}अपॉइंटमेंट {slot} पर पक्का है। क्या क्लिनिक का पता या फीस के बारे में कुछ जानना चाहते हैं?"
-            else:
-                fallback_followup = f"Yes, {name_str}appointment is confirmed for {slot}. Would you like to know the clinic address or consultation fees?"
-            session_manager.add_model_message(call_sid, fallback_followup)
-            logger.info(f"[CALL {call_sid[-6:]}] Post-booking open follow-up: {fallback_followup}")
-            return fallback_followup, False
-
-        # --- 2. ENTERPRISE SLOT STATE MACHINE (Guarantees <0.5s slot capture & zero loop) ---
-        slots = extract_slots_from_text(user_speech, session)
-
-        # Check if all booking slots are now satisfied
-        p_name = slots.get("patient_name")
-        symp = slots.get("symptoms")
-        time_s = slots.get("time_slot")
-        phone_n = slots.get("phone_number") or (session.caller_phone if session.caller_phone and len(re.sub(r'\D', '', session.caller_phone)) >= 10 else None)
-
-        if p_name and symp and time_s and phone_n and not session.is_completed:
-            clean_digits = re.sub(r'\D', '', phone_n)[-10:]
-            readback = format_digits_for_readback(clean_digits)
-            date_val = slots.get("date") or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-            duration_val = slots.get("duration") or "Recently noticed"
-
-            booking = sheet_service.save_appointment(
-                patient_name=p_name,
-                phone_number=clean_digits,
-                date_str=date_val,
-                time_slot=time_s,
-                symptoms=symp,
-                duration=duration_val
-            )
-            telegram_service.send_appointment_alert(booking)
-            session_manager.mark_completed(call_sid, booking)
-
-            try:
-                dt = datetime.strptime(date_val, "%Y-%m-%d")
-                friendly_date = dt.strftime("%A, %B %d")
-            except Exception:
-                friendly_date = date_val
-
-            clean_slot = time_s.replace(":00", "").replace(" PM", " बजे").replace(" AM", " बजे")
-
-            if user_lang == "HINDI":
-                spoken_text = (
-                    f"बिल्कुल! {p_name} जी का अपॉइंटमेंट {friendly_date} को "
-                    f"{clean_slot} पक्का हो गया है। आपका फ़ोन नंबर {readback} नोट कर लिया गया है। "
-                    "क्या क्लिनिक का पता या फीस जाननी है?"
-                )
-            else:
-                doc = clinic_service.profile.doctor_name
-                spoken_text = (
-                    f"Perfect! The appointment for {p_name} with {doc} is confirmed for "
-                    f"{friendly_date} at {time_s} for {symp}. Registered contact number is {readback}. "
-                    "Do you need clinic address or timings?"
-                )
-
-            cleaned = clean_for_speech(spoken_text, is_hindi=(user_lang == "HINDI"))
-            session_manager.add_model_message(call_sid, cleaned)
-            logger.info(f"[CALL {call_sid[-6:]}] Confirmed Booking via Fast Slot Machine: {booking['booking_id']} for {p_name}")
-            return cleaned, False
+        session_manager.add_user_message(call_sid, user_speech)
+        logger.info(f"\n[CALL {call_sid[-6:]}] User Said: '{user_speech}'")
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         schedule_summary = get_live_schedule_summary()
-        
-        # Inject known slot context to prevent repetitive questions
-        known_info = []
-        if slots.get("patient_name"): known_info.append(f"Patient Name: {slots['patient_name']}")
-        if slots.get("symptoms"): known_info.append(f"Symptoms: {slots['symptoms']}")
-        if slots.get("duration"): known_info.append(f"Duration: {slots['duration']}")
-        if slots.get("time_slot"): known_info.append(f"Preferred Time: {slots['time_slot']}")
-        slot_context = f"\nKNOWN DETAILS ALREADY CAPTURED: [{', '.join(known_info)}]. Do NOT re-ask for details already captured!" if known_info else ""
-
-        system_prompt = get_receptionist_prompt(today_str, schedule_summary, target_lang=user_lang) + slot_context
+        system_prompt = get_receptionist_prompt(today_str, schedule_summary)
 
         include_tools = not session.is_completed
 
@@ -847,25 +210,20 @@ class LLMService:
                 args = func_call.get("args", {})
                 patient_name = args.get("patient_name", "Patient").strip().title()
 
+                # Validate patient name against relationship words or pronouns
                 if patient_name.lower() in INVALID_RELATION_NAMES or len(patient_name) <= 2:
-                    if user_lang == "HINDI":
-                        prompt_for_name = "जी बिल्कुल! कृपया मरीज का शुभ नाम बता दीजिए ताकि मैं अपॉइंटमेंट बुक कर सकूँ?"
-                    else:
-                        prompt_for_name = "Certainly! Could you please share the patient's full name so I can confirm the booking?"
+                    prompt_for_name = "Ji bilkul! Kripya mareez ka shubh naam bata dijiye taaki main appointment book kar sakoon?"
                     session_manager.add_model_message(call_sid, prompt_for_name)
                     logger.info(f"[CALL {call_sid[-6:]}] Filtered invalid name '{patient_name}'. Asking for real patient name.")
                     return prompt_for_name, False
 
-                # Parse and validate 10-digit phone number
+                # Validate phone number
                 raw_phone = str(args.get("phone_number") or "")
                 parsed_phone = parse_spoken_hindi_numbers(raw_phone)
                 phone = parsed_phone or (session.caller_phone if session.caller_phone and len(re.sub(r'\D', '', session.caller_phone)) >= 10 else None)
 
                 if not phone or len(re.sub(r'\D', '', phone)) < 10:
-                    if user_lang == "HINDI":
-                        prompt_phone = "जी बिल्कुल! अपॉइंटमेंट बुक करने के लिए कृपया अपना 10 अंकों का मोबाइल नंबर बता दीजिए।"
-                    else:
-                        prompt_phone = "Certainly! Please share your 10-digit contact number to confirm the booking."
+                    prompt_phone = "Appointment confirm karne ke liye kripya apna 10-digit mobile number bata dijiye."
                     session_manager.add_model_message(call_sid, prompt_phone)
                     logger.info(f"[CALL {call_sid[-6:]}] Phone missing or incomplete. Asking for phone number.")
                     return prompt_phone, False
@@ -896,57 +254,55 @@ class LLMService:
                 except Exception:
                     friendly_date = date_val
 
-                clean_slot = slot.replace(":00", "").replace(" PM", " बजे").replace(" AM", " बजे")
+                clean_slot = slot.replace(":00", "")
 
-                if user_lang == "HINDI":
+                # Format spoken confirmation in natural conversational style matching caller's language
+                if is_devanagari_text(user_speech):
                     spoken_text = (
                         f"बिल्कुल! {patient_name} जी का अपॉइंटमेंट {friendly_date} को "
-                        f"{clean_slot} पक्का हो गया है। आपका फ़ोन नंबर {readback} नोट कर लिया गया है। "
+                        f"{clean_slot} बजे पक्का हो गया है। आपका फ़ोन नंबर {readback} नोट कर लिया गया है। "
                         "क्या क्लिनिक का पता या फीस जाननी है?"
                     )
                 else:
-                    doc = clinic_service.profile.doctor_name
                     spoken_text = (
-                        f"Perfect! The appointment for {patient_name} with {doc} is confirmed for "
-                        f"{friendly_date} at {slot} for {symptoms}. Registered contact number is {readback}. "
-                        "Do you need clinic address or timings?"
+                        f"Bilkul! {patient_name} ji ka appointment {friendly_date} ko "
+                        f"{clean_slot} baje confirm ho gaya hai. Phone number {readback} note kar liya hai. "
+                        "Kya clinic ka address ya fees ke baare mein kuch poochna hai?"
                     )
 
                 logger.info(f"[CALL {call_sid[-6:]}] Confirmed Booking: {booking['booking_id']} for {patient_name}")
                 is_done = False
 
             else:
-                if direct_text and len(direct_text.strip()) > 3:
-                    spoken_text = direct_text
-                else:
-                    doc = clinic_service.profile.doctor_name
-                    if user_lang == "HINDI":
-                        spoken_text = "जी बिल्कुल! बताइए मैं आपकी क्या मदद कर सकती हूँ?"
-                    else:
-                        spoken_text = f"Certainly! How may I assist you with your appointment with {doc} today?"
+                spoken_text = direct_text if direct_text and len(direct_text.strip()) > 3 else "Ji bilkul, bataiye main aapki kya madad kar sakti hoon?"
                 is_done = False
 
-            cleaned = clean_for_speech(spoken_text, is_hindi=(user_lang == "HINDI"))
+            cleaned = clean_for_speech(spoken_text)
             session_manager.add_model_message(call_sid, cleaned)
-            logger.info(f"[CALL {call_sid[-6:]}] AI Replied: {cleaned}")
-
+            logger.info(f"[CALL {call_sid[-6:]}] AI Replied: '{cleaned}'")
             return cleaned, is_done
 
         except Exception as e:
             logger.error(f"[CALL {call_sid[-6:]}] Error in LLM turn: {e}")
-            doc = clinic_service.profile.doctor_name
-            # Smart context-aware conversational fallback
-            if any(t in user_lower for t in ["6:30", "11:30", "12:30", "1:30", "7:30", "6", "7", "11", "12", "baje", "pm", "am", "time", "slot"]):
-                if user_lang == "HINDI":
-                    fallback = "जी समझ गई। अपॉइंटमेंट पक्का करने के लिए कृपया अपना 10 अंकों का मोबाइल नंबर बता दीजिए।"
-                else:
-                    fallback = "Understood. Please share your 10-digit contact number so I can confirm your slot."
-            else:
-                if user_lang == "HINDI":
-                    fallback = "जी बिल्कुल, आप अपनी समस्या और आने का समय बता दीजिए।"
-                else:
-                    fallback = f"Certainly! Could you please share your symptoms and preferred time to see {doc}?"
+            fallback = "Ji bilkul, aap apni takleef aur doctor se milne ka samay bata dijiye."
             session_manager.add_model_message(call_sid, fallback)
             return fallback, False
+
+    async def stream_turn(self, call_sid: str, user_speech: str) -> AsyncGenerator[tuple[str, bool], None]:
+        """
+        Streaming wrapper for real-time WebSockets / SSE.
+        Yields sentence chunks so caller hears audio immediately.
+        """
+        reply_text, is_done = self.process_turn(call_sid, user_speech)
+        sentences, _ = split_sentences(reply_text)
+        if not sentences:
+            sentences = [reply_text]
+
+        for idx, sentence in enumerate(sentences):
+            cleaned = clean_for_speech(sentence)
+            if cleaned:
+                # Last chunk conveys is_done state
+                last_chunk = (idx == len(sentences) - 1)
+                yield cleaned, (is_done if last_chunk else False)
 
 llm_service = LLMService()

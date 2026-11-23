@@ -1,0 +1,26 @@
+# Environment & Secrets (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Cache & Local Storage
+data/audio_cache/*
+!data/audio_cache/.gitkeep
+data/appointments.xlsx
+
+# Editor & System
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

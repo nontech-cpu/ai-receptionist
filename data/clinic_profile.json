@@ -1,0 +1,44 @@
+{
+  "clinic_id": "clinic_sharma_01",
+  "clinic_name": "Dr. Sharma Care Clinic",
+  "doctor_name": "Dr. Sharma",
+  "doctor_qualification": "MBBS, MD (Senior Physician)",
+  "specialization": "General Medicine, Eye Care & Diabetes",
+  "receptionist_name": "Maya",
+  "location": {
+    "address": "Main Market Road",
+    "landmark": "Opposite City Hospital, 2nd Floor",
+    "city": "Jaipur",
+    "state": "Rajasthan",
+    "pincode": "302001",
+    "directions_summary": "Main Market Road par, City Hospital ke theek samne, doosri manzil par"
+  },
+  "timings": {
+    "days_summary": "Monday to Saturday",
+    "working_hours": "11:00 AM to 02:00 PM & 06:00 PM to 08:00 PM",
+    "morning_slot": "11:00 AM to 02:00 PM",
+    "evening_slot": "06:00 PM to 08:00 PM",
+    "closed_break": "02:00 PM to 06:00 PM (Doctor strictly unavailable)",
+    "closed_days": [
+      "Sunday"
+    ],
+    "slot_duration_minutes": 30
+  },
+  "pricing": {
+    "consultation_fee": 500,
+    "followup_fee": 300,
+    "currency": "INR",
+    "currency_symbol": "₹",
+    "payment_modes": "Cash and UPI (Google Pay, PhonePe, Paytm)"
+  },
+  "emergency": {
+    "helpline": "108",
+    "emergency_protocol": "Ye emergency lag rahi hai, please turant nearest hospital emergency room ya 108 par call karein."
+  },
+  "faqs": {
+    "parking": "Haan, clinic ke basement mein free parking suvidha uplabdh hai.",
+    "insurance": "OPD consultation ke liye direct cash ya UPI payment hoti hai, aur reimbursement bill diya jata hai.",
+    "reports": "Pichhli test reports ya medicines aap clinic aate waqt sath la sakte hain.",
+    "eye_checkup": "Haan, clinic par aankh ka number aur vision screening ki suvidha uplabdh hai."
+  }
+}

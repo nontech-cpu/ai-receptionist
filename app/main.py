@@ -220,8 +220,8 @@ def index():
                     </p>
                     <div class="space-y-3">
                         <div>
-                            <label class="block text-xs font-medium text-slate-400 mb-1">Enter your Ngrok Public URL:</label>
-                            <input id="ngrokUrl" type="url" value="https://tightly-barbell-creamed.ngrok-free.dev" placeholder="https://xxxx-xx.ngrok-free.app" 
+                            <label class="block text-xs font-medium text-slate-400 mb-1">Server Public URL (Auto-detected):</label>
+                            <input id="ngrokUrl" type="url" placeholder="Auto-detecting server URL..." 
                                 class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500">
                         </div>
                         <button onclick="triggerCall()" id="callBtn"
@@ -633,6 +633,9 @@ def index():
         loadAppointments();
         loadClinicProfile();
         loadTelegramStatus();
+        if (document.getElementById('ngrokUrl')) {
+            document.getElementById('ngrokUrl').value = window.location.origin;
+        }
         setInterval(loadTelegramStatus, 5000);
         setInterval(loadAppointments, 5000);
     </script>

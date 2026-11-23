@@ -258,12 +258,8 @@ async def trigger_outbound_call(request: Request, to_number: str = "+91882446622
         else:
             clean_to = f"+{clean_to}"
 
-    # Dynamic Trial Mapping: Automatically uses the assigned Twilio number per tester
-    TRIAL_FROM_MAP = {
-        "+919549408914": "+17372212163",  # Assigned Twilio trial number for +919549408914
-        "+918824466229": "+17372508034",  # Assigned Twilio trial number for +918824466229
-    }
-    from_number = TRIAL_FROM_MAP.get(clean_to, settings.TWILIO_PHONE_NUMBER)
+    # Primary outbound number from Twilio settings
+    from_number = settings.TWILIO_PHONE_NUMBER or "+17372212163"
 
     # Clean and sanitize target webhook URL
     raw = (raw_webhook or "").strip().rstrip(". ").rstrip("/")

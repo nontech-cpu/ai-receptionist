@@ -220,6 +220,11 @@ def index():
                     </p>
                     <div class="space-y-3">
                         <div>
+                            <label class="block text-xs font-medium text-slate-400 mb-1">Target Phone Number (with Country Code):</label>
+                            <input id="targetPhone" type="tel" value="+918824466229" placeholder="+919876543210" 
+                                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono">
+                        </div>
+                        <div>
                             <label class="block text-xs font-medium text-slate-400 mb-1">Server Public URL (Auto-detected):</label>
                             <input id="ngrokUrl" type="url" placeholder="Auto-detecting server URL..." 
                                 class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500">
@@ -227,7 +232,7 @@ def index():
                         <button onclick="triggerCall()" id="callBtn"
                             class="w-full py-2.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium rounded-xl shadow-lg shadow-blue-500/20 transition flex items-center justify-center space-x-2">
                             <i class="fa-solid fa-phone"></i>
-                            <span>Call My Phone Now</span>
+                            <span>Call Target Phone Now</span>
                         </button>
                         <p id="callStatus" class="text-xs text-center font-medium mt-2 hidden"></p>
                     </div>
@@ -547,22 +552,28 @@ def index():
         }
 
         async function triggerCall() {
+            let phone = document.getElementById('targetPhone') ? document.getElementById('targetPhone').value.trim() : '+918824466229';
             let ngrok = document.getElementById('ngrokUrl').value.trim().replace(/\\.+$/, '').replace(/\\/+$/, '');
             const status = document.getElementById('callStatus');
             const btn = document.getElementById('callBtn');
 
+            if (!phone) {
+                alert('Please enter a phone number with country code (e.g. +91...)');
+                return;
+            }
+
             if (!ngrok) {
-                alert('Please enter your Ngrok URL first (e.g. https://xxxx.ngrok-free.app)');
+                alert('Server URL could not be detected. Please enter URL manually.');
                 return;
             }
 
             btn.disabled = true;
             btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i> Calling...';
             status.className = 'text-xs text-center text-yellow-400 mt-2 block';
-            status.innerText = 'Initiating Twilio call to +918824466229...';
+            status.innerText = `Initiating Twilio call to ${phone}...`;
 
             try {
-                const res = await fetch(`/api/make-call?to_number=%2B918824466229&webhook_url=${encodeURIComponent(ngrok)}`, {
+                const res = await fetch(`/api/make-call?to_number=${encodeURIComponent(phone)}&webhook_url=${encodeURIComponent(ngrok)}`, {
                     method: 'POST'
                 });
                 const data = await res.json();

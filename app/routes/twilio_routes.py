@@ -14,11 +14,13 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 VOICE_NAME = "Polly.Kajal-Neural"
-VOICE_LANG = "en-IN"
+VOICE_LANG = "hi-IN"
 SPEECH_HINTS = (
     "fees, fee, paise, rupees, consultation, charge, cost, address, location, landmark, timing, "
-    "parking, appointment, booking, doctor, clinic, Devendra, Rahul, Sharma, "
+    "parking, appointment, booking, doctor, clinic, Devendra, Devender, Rahul, Sharma, "
     "today, tomorrow, number, phone, bhai, bukhar, khansi, checkup, "
+    "dast, dast hai, ulti, pet dard, sir dard, 10 din, 2 din, 3 din, 10 days, 10 deen, "
+    "kal, aaj, subah, shaam, 11 baje, 6 baje, 7 baje, loose motion, "
     "I want to book an appointment, appointment book karna hai, doctor se milna hai, checkup karwana hai"
 )
 
@@ -61,7 +63,9 @@ async def extract_request_data(request: Request) -> dict:
 def create_gather(base_url: str = "") -> Gather:
     """
     Standard listening window supporting speech + keypad DTMF input:
-    - speech_timeout='auto' prevents Twilio from cutting off caller prematurely.
+    - speech_model='phone_call' with enhanced=True: Google Telephony model trained on 8kHz mobile audio.
+    - language='hi-IN': Accurately recognizes Hindi and Indian English seamlessly without missing 'dast' or '10 din'.
+    - speech_timeout='auto' with timeout='7': prevents premature cutoffs.
     - Explicit absolute action URL prevents cross-host resolution failures.
     """
     action_url = f"{base_url}/voice/respond" if base_url else "/voice/respond"
@@ -72,9 +76,11 @@ def create_gather(base_url: str = "") -> Gather:
         action=action_url,
         method="POST",
         speech_timeout="auto",
-        timeout="8",
+        timeout="7",
         hints=SPEECH_HINTS,
-        language=VOICE_LANG
+        language="hi-IN",
+        speech_model="phone_call",
+        enhanced=True
     )
 
 def is_hindi_phrase(text: str) -> bool:

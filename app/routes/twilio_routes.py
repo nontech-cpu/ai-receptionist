@@ -59,11 +59,11 @@ async def extract_request_data(request: Request) -> dict:
                 pass
     return data
 
-def create_gather(base_url: str = "") -> Gather:
+def create_gather(base_url: str = "", language: str = "en-IN") -> Gather:
     """
     Standard listening window supporting speech + keypad DTMF input:
     - speech_model='phone_call' with enhanced=True: Google Telephony model trained on 8kHz mobile audio.
-    - language='hi-IN': Accurately recognizes Hindi and Indian English seamlessly without missing 'dast' or '10 din'.
+    - language='en-IN': Natively transcribes English, Indian English, and Roman Hinglish with high fidelity.
     - speech_timeout='auto' with timeout='7': prevents premature cutoffs.
     - Explicit absolute action URL prevents cross-host resolution failures.
     """
@@ -77,7 +77,7 @@ def create_gather(base_url: str = "") -> Gather:
         speech_timeout="auto",
         timeout="7",
         hints=SPEECH_HINTS,
-        language="hi-IN",
+        language=language,
         speech_model="phone_call",
         enhanced=True
     )
@@ -186,7 +186,13 @@ async def voice_respond(request: Request):
         # If booking is already done, user stayed silent to finish -> Graceful wrap-up!
         if session.is_completed:
             print(f"[CALL {call_sid[-6:]}] User silent after confirmation. Ending call gracefully.")
-            speak_or_play(resp, f"{p.clinic_name} में कॉल करने के लिए धन्यवाद। अपना ख्याल रखियेगा, नमस्ते!", base_url)
+            if getattr(session, "language", "") == "ENGLISH":
+                farewell = f"Thank you for calling {p.clinic_name}. Take care and goodbye!"
+            elif getattr(session, "language", "") == "HINDI_DEVANAGARI":
+                farewell = f"{p.clinic_name} में कॉल करने के लिए धन्यवाद। अपना ख्याल रखियेगा, नमस्ते!"
+            else:
+                farewell = f"{p.clinic_name} mein call karne ke liye shukriya. Apna khayal rakhiye, namaste!"
+            speak_or_play(resp, farewell, base_url)
             resp.hangup()
             return Response(content=str(resp), media_type="text/xml")
 
@@ -195,7 +201,12 @@ async def voice_respond(request: Request):
 
         if session.silence_count == 1:
             # First silence warning
-            silence_msg = "माफ़ कीजियेगा, आपकी आवाज़ नहीं आई। कृपया बताइये मैं आपकी क्या सहायता करूँ?"
+            if getattr(session, "language", "") == "ENGLISH":
+                silence_msg = "Sorry, I could not hear you. Could you please repeat that?"
+            elif getattr(session, "language", "") == "HINDI_DEVANAGARI":
+                silence_msg = "माफ़ कीजियेगा, आपकी आवाज़ नहीं आई। कृपया बताइये मैं आपकी क्या सहायता करूँ?"
+            else:
+                silence_msg = "Maaf kariyega, aapki aawaz nahi aayi. Kripya batayein main aapki kya madad kar sakti hoon?"
             speak_or_play(resp, silence_msg, base_url)
             gather = create_gather(base_url)
             resp.append(gather)
@@ -205,7 +216,13 @@ async def voice_respond(request: Request):
         else:
             # Second silence -> Hangup!
             print(f"[CALL {call_sid[-6:]}] Second silence reached. Ending call.")
-            speak_or_play(resp, f"आपकी आवाज़ नहीं आ रही है। {p.clinic_name} में कॉल करने के लिए धन्यवाद। नमस्ते!", base_url)
+            if getattr(session, "language", "") == "ENGLISH":
+                hangup_msg = f"I am still unable to hear you. Thank you for calling {p.clinic_name}. Goodbye!"
+            elif getattr(session, "language", "") == "HINDI_DEVANAGARI":
+                hangup_msg = f"आपकी आवाज़ नहीं आ रही है। {p.clinic_name} में कॉल करने के लिए धन्यवाद। नमस्ते!"
+            else:
+                hangup_msg = f"Aapki aawaz nahi aa rahi hai. {p.clinic_name} mein call karne ke liye shukriya. Namaste!"
+            speak_or_play(resp, hangup_msg, base_url)
             resp.hangup()
             return Response(content=str(resp), media_type="text/xml")
 

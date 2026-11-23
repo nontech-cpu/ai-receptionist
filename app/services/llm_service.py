@@ -19,10 +19,9 @@ http_session = requests.Session()
 http_session.headers.update({"Connection": "close"})
 
 FAST_MODELS = [
-    ("gemini-flash-lite-latest", 4.5),
-    ("gemini-3.5-flash-lite", 4.5),
-    ("gemini-3.1-flash-lite", 4.5),
-    ("gemini-flash-latest", 4.5)
+    ("gemini-3.5-flash-lite", 4.0),
+    ("gemini-flash-lite-latest", 4.0),
+    ("gemini-3.1-flash-lite", 4.0)
 ]
 
 INVALID_RELATION_NAMES = {
@@ -86,6 +85,38 @@ def clean_for_speech(text: str) -> str:
 def is_devanagari_text(text: str) -> bool:
     """Detects if text contains native Devanagari script."""
     return any('\u0900' <= char <= '\u097f' for char in text)
+
+def detect_caller_language(text: str) -> str:
+    """Detects whether text is English, Devanagari Hindi, or Hinglish."""
+    if is_devanagari_text(text):
+        return "HINDI_DEVANAGARI"
+
+    english_cues = {
+        "i", "want", "need", "appointment", "doctor", "sharma", "fever", "cough", 
+        "available", "time", "fee", "fees", "address", "please", "can", "could", 
+        "would", "like", "for", "my", "name", "is", "at", "tomorrow", "today", 
+        "morning", "evening", "hello", "hi", "hey", "good", "am", "pm", "pain", 
+        "have", "has", "booking", "book", "call", "phone", "number", "what", "where",
+        "when", "how", "much", "cost", "clinic", "who", "which"
+    }
+    hindi_cues = {
+        "mujhe", "mera", "mere", "meri", "chahiye", "hai", "hain", "karna", "karana",
+        "karwana", "dost", "bhai", "baje", "kal", "aaj", "subah", "shaam", "dast", 
+        "bukhar", "khansi", "dard", "paon", "pet", "sir", "naam", "kya", "kab", 
+        "kahan", "kitna", "kitne", "theek", "haan", "nahi", "nahin", "unka", "unki"
+    }
+    words = re.findall(r'[a-zA-Z]+', text.lower())
+    if not words:
+        return "HINGLISH"
+
+    hindi_count = sum(1 for w in words if w in hindi_cues)
+    english_count = sum(1 for w in words if w in english_cues)
+
+    if hindi_count > 0 and hindi_count >= english_count:
+        return "HINGLISH"
+    if english_count >= 1:
+        return "ENGLISH"
+    return "HINGLISH"
 
 def get_live_schedule_summary() -> str:
     """Generates real-time 3-day continuous schedule summary for prompt injection."""
@@ -158,6 +189,8 @@ class LLMService:
         """
         session = session_manager.get_or_create(call_sid)
         user_lower = user_speech.lower().strip()
+        caller_lang = detect_caller_language(user_speech)
+        session.language = caller_lang
 
         # Parse spoken 10-digit mobile number if caller speaks one
         spoken_phone = parse_spoken_hindi_numbers(user_speech)
@@ -178,17 +211,23 @@ class LLMService:
             ])
             is_closing = any(re.search(r'\b' + re.escape(c) + r'\b', user_lower) for c in closing_words) and not has_question
             if is_closing:
-                closing_reply = "Aapka bahut-bahut shukriya! Clinic par samay se 10 minute pehle pahunchein. Apna khayal rakhiye, namaste!"
+                if caller_lang == "ENGLISH":
+                    closing_reply = "Thank you very much! Please arrive at the clinic 10 minutes prior to your slot. Take care and goodbye!"
+                elif caller_lang == "HINDI_DEVANAGARI":
+                    closing_reply = "आपका बहुत-बहुत धन्यवाद! क्लिनिक पर समय से 10 मिनट पहले पधारें। अपना ख्याल रखियेगा, नमस्ते!"
+                else:
+                    closing_reply = "Aapka bahut-bahut shukriya! Clinic par samay se 10 minute pehle pahunchein. Apna khayal rakhiye, namaste!"
                 session_manager.add_model_message(call_sid, closing_reply)
                 logger.info(f"[CALL {call_sid[-6:]}] Call Completed Gracefully: {closing_reply}")
                 return closing_reply, True
 
         session_manager.add_user_message(call_sid, user_speech)
-        logger.info(f"\n[CALL {call_sid[-6:]}] User Said: '{user_speech}'")
+        logger.info(f"\n[CALL {call_sid[-6:]}] User Said ({caller_lang}): '{user_speech}'")
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         schedule_summary = get_live_schedule_summary()
-        system_prompt = get_receptionist_prompt(today_str, schedule_summary)
+        lang_directive = f"\nCRITICAL DIRECTIVE: The caller is speaking in {caller_lang}. You MUST reply STRICTLY in {caller_lang}! If ENGLISH, reply 100% in polished English without any Hindi words. If HINGLISH, reply in conversational Roman Hinglish."
+        system_prompt = get_receptionist_prompt(today_str, schedule_summary) + lang_directive
 
         include_tools = not session.is_completed
 
@@ -212,7 +251,7 @@ class LLMService:
 
                 # Validate patient name against relationship words or pronouns
                 if patient_name.lower() in INVALID_RELATION_NAMES or len(patient_name) <= 2:
-                    prompt_for_name = "Ji bilkul! Kripya mareez ka shubh naam bata dijiye taaki main appointment book kar sakoon?"
+                    prompt_for_name = "Certainly! Could you please share the patient's full name so I can confirm the booking?" if caller_lang == "ENGLISH" else "Ji bilkul! Kripya mareez ka shubh naam bata dijiye taaki main appointment book kar sakoon?"
                     session_manager.add_model_message(call_sid, prompt_for_name)
                     logger.info(f"[CALL {call_sid[-6:]}] Filtered invalid name '{patient_name}'. Asking for real patient name.")
                     return prompt_for_name, False
@@ -223,7 +262,7 @@ class LLMService:
                 phone = parsed_phone or (session.caller_phone if session.caller_phone and len(re.sub(r'\D', '', session.caller_phone)) >= 10 else None)
 
                 if not phone or len(re.sub(r'\D', '', phone)) < 10:
-                    prompt_phone = "Appointment confirm karne ke liye kripya apna 10-digit mobile number bata dijiye."
+                    prompt_phone = "Please share your 10-digit contact mobile number to confirm the booking." if caller_lang == "ENGLISH" else "Appointment confirm karne ke liye kripya apna 10-digit mobile number bata dijiye."
                     session_manager.add_model_message(call_sid, prompt_phone)
                     logger.info(f"[CALL {call_sid[-6:]}] Phone missing or incomplete. Asking for phone number.")
                     return prompt_phone, False
@@ -257,7 +296,14 @@ class LLMService:
                 clean_slot = slot.replace(":00", "")
 
                 # Format spoken confirmation in natural conversational style matching caller's language
-                if is_devanagari_text(user_speech):
+                if caller_lang == "ENGLISH":
+                    doc = clinic_service.profile.doctor_name
+                    spoken_text = (
+                        f"Certainly! The appointment for {patient_name} with {doc} is confirmed for "
+                        f"{friendly_date} at {slot}. Registered contact number is {readback}. "
+                        "Would you like to know the clinic address or consultation fees?"
+                    )
+                elif caller_lang == "HINDI_DEVANAGARI":
                     spoken_text = (
                         f"बिल्कुल! {patient_name} जी का अपॉइंटमेंट {friendly_date} को "
                         f"{clean_slot} बजे पक्का हो गया है। आपका फ़ोन नंबर {readback} नोट कर लिया गया है। "
@@ -274,17 +320,18 @@ class LLMService:
                 is_done = False
 
             else:
-                spoken_text = direct_text if direct_text and len(direct_text.strip()) > 3 else "Ji bilkul, bataiye main aapki kya madad kar sakti hoon?"
+                default_opener = "Certainly! How may I assist you today?" if caller_lang == "ENGLISH" else "Ji bilkul, bataiye main aapki kya madad kar sakti hoon?"
+                spoken_text = direct_text if direct_text and len(direct_text.strip()) > 3 else default_opener
                 is_done = False
 
             cleaned = clean_for_speech(spoken_text)
             session_manager.add_model_message(call_sid, cleaned)
-            logger.info(f"[CALL {call_sid[-6:]}] AI Replied: '{cleaned}'")
+            logger.info(f"[CALL {call_sid[-6:]}] AI Replied ({caller_lang}): '{cleaned}'")
             return cleaned, is_done
 
         except Exception as e:
             logger.error(f"[CALL {call_sid[-6:]}] Error in LLM turn: {e}")
-            fallback = "Ji bilkul, aap apni takleef aur doctor se milne ka samay bata dijiye."
+            fallback = "Certainly! Could you please share your symptoms and preferred time to see Dr. Sharma?" if caller_lang == "ENGLISH" else "Ji bilkul, aap apni takleef aur doctor se milne ka samay bata dijiye."
             session_manager.add_model_message(call_sid, fallback)
             return fallback, False
 

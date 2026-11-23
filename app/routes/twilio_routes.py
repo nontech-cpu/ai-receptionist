@@ -29,24 +29,25 @@ def get_initial_greeting() -> str:
     )
 
 def get_base_url(request: Request) -> str:
-    """Dynamically determines the public HTTPS URL from ngrok headers."""
+    """Dynamically determines the public HTTPS URL from railway / reverse-proxy headers."""
     proto = request.headers.get("x-forwarded-proto", "https")
-    host = request.headers.get("x-forwarded-host", request.headers.get("host", "tightly-barbell-creamed.ngrok-free.dev"))
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", "web-production-eedb2a06.up.railway.app"))
     return f"{proto}://{host}"
 
-def create_gather(base_url: str) -> Gather:
+def create_gather() -> Gather:
     """
-    Standard 7-second listening window supporting speech + keypad DTMF input:
-    Allows caller to either speak or type their phone number on dial pad.
+    Standard listening window supporting speech + keypad DTMF input:
+    - speech_timeout='auto' prevents Twilio from cutting off caller prematurely during natural conversational pauses.
+    - Uses relative action='/voice/respond' so Twilio stays on the active HTTPS connection without 301 redirects.
     """
     return Gather(
         input="speech dtmf",
         num_digits=10,
         finish_on_key="#",
-        action=f"{base_url}/voice/respond",
+        action="/voice/respond",
         method="POST",
-        speech_timeout="1",
-        timeout="7",
+        speech_timeout="auto",
+        timeout="8",
         hints=SPEECH_HINTS,
         language=VOICE_LANG
     )
@@ -124,11 +125,11 @@ async def voice_incoming(request: Request):
 
     resp = VoiceResponse()
     speak_or_play(resp, greeting, base_url)
-    gather = create_gather(base_url)
+    gather = create_gather()
     resp.append(gather)
 
-    # If initial 10s silence expires, Twilio falls through to voice/respond automatically
-    resp.redirect(f"{base_url}/voice/respond", method="POST")
+    # If initial 8s silence expires, Twilio falls through to voice/respond automatically
+    resp.redirect("/voice/respond", method="POST")
 
     return Response(content=str(resp), media_type="text/xml")
 
@@ -170,17 +171,17 @@ async def voice_respond(request: Request):
         print(f"[CALL {call_sid[-6:]}] Silence detected! Consecutive count = {session.silence_count}")
 
         if session.silence_count == 1:
-            # First 10s silence warning
+            # First 8s silence warning
             silence_msg = "माफ़ कीजियेगा, आपकी आवाज़ नहीं आई। कृपया बताइये मैं आपकी क्या सहायता करूँ?"
             speak_or_play(resp, silence_msg, base_url)
-            gather = create_gather(base_url)
+            gather = create_gather()
             resp.append(gather)
-            resp.redirect(f"{base_url}/voice/respond", method="POST")
+            resp.redirect("/voice/respond", method="POST")
             return Response(content=str(resp), media_type="text/xml")
 
         else:
-            # Second 10s silence (Total 20s of no audio) -> Hangup!
-            print(f"[CALL {call_sid[-6:]}] Second 10s silence reached. Ending call.")
+            # Second silence (Total ~16s of no audio) -> Hangup!
+            print(f"[CALL {call_sid[-6:]}] Second silence reached. Ending call.")
             speak_or_play(resp, f"आपकी आवाज़ नहीं आ रही है। {p.clinic_name} में कॉल करने के लिए धन्यवाद। नमस्ते!", base_url)
             resp.hangup()
             return Response(content=str(resp), media_type="text/xml")
@@ -200,10 +201,10 @@ async def voice_respond(request: Request):
         resp.hangup()
     else:
         # Active conversation: gather next user response
-        gather = create_gather(base_url)
+        gather = create_gather()
         resp.append(gather)
-        # If user stays silent after reply, falls through to 10s silence handler
-        resp.redirect(f"{base_url}/voice/respond", method="POST")
+        # If user stays silent after reply, falls through to silence handler
+        resp.redirect("/voice/respond", method="POST")
 
     return Response(content=str(resp), media_type="text/xml")
 

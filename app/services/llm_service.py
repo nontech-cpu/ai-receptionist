@@ -20,8 +20,8 @@ http_session = requests.Session()
 http_session.headers.update({"Connection": "close"})
 
 FAST_MODELS = [
-    ("gemini-3.5-flash-lite", 3.2),
-    ("gemini-3.1-flash-lite", 2.2)
+    ("gemini-3.5-flash-lite", 5.5),
+    ("gemini-3.1-flash-lite", 3.5)
 ]
 
 TOOLS_DEFINITION = [

@@ -1,5 +1,6 @@
 import logging
 from fastapi import APIRouter, Request, Form, Response, WebSocket
+from fastapi.responses import JSONResponse
 from twilio.twiml.voice_response import VoiceResponse, Gather, Connect, Stream, Parameter
 from twilio.rest import Client
 from app.core.config import settings
@@ -262,14 +263,20 @@ async def voice_respond(request: Request):
     return Response(content=str(resp), media_type="text/xml")
 
 @router.api_route("/api/make-call", methods=["GET", "POST"])
-async def trigger_outbound_call(request: Request, to_number: str = "+918824466229", webhook_url: str = ""):
+async def trigger_outbound_call(request: Request, to_number: str = "", webhook_url: str = ""):
     verify_admin_key(request)
     if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
-        return {"error": "Twilio credentials not configured."}
+        return JSONResponse(status_code=500, content={"error": "Twilio credentials not configured."})
 
     data = await extract_request_data(request)
-    raw_to = data.get("to_number", to_number)
-    raw_webhook = data.get("webhook_url", webhook_url)
+    raw_to = str(data.get("to_number") or to_number or "").strip()
+    raw_webhook = str(data.get("webhook_url") or webhook_url or "").strip()
+
+    if not raw_to:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Destination phone number 'to_number' is required."}
+        )
 
     # Clean and sanitize target phone number (auto prepend +91 for 10-digit Indian numbers)
     clean_to = raw_to.strip().replace(" ", "").replace("-", "")
@@ -315,9 +322,9 @@ async def trigger_outbound_call(request: Request, to_number: str = "+91882446622
     except Exception as e:
         err_msg = str(e)
         if "isn't assigned to this verified voice recipient" in err_msg or "21215" in err_msg:
-            err_msg = f"Twilio Trial Restriction: {clean_to} is not verified. Please call a verified number (+918824466229 / +918441937079) or verify {clean_to} in Twilio Console first."
+            err_msg = f"Twilio Trial Restriction: {clean_to} is not verified. Please verify {clean_to} in Twilio Console or use an approved verified caller ID."
         logger.error(f"Failed to initiate outbound call: {err_msg}")
-        return {"error": err_msg}
+        return JSONResponse(status_code=400, content={"error": err_msg})
 
 @router.websocket("/voice/stream")
 async def voice_stream_endpoint(websocket: WebSocket):

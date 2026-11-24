@@ -40,7 +40,7 @@ def test_sensitive_data_masked_in_logging():
     Verify patient contact numbers and credentials are masked for log output.
     """
     assert mask_sensitive_data("9829012345") == "******2345"
-    assert mask_sensitive_data("+918824466229") == "*" * 9 + "6229"
+    assert mask_sensitive_data("+919876543210") == "*" * 9 + "3210"
     assert mask_sensitive_data("secret_token_123456") == "*" * 15 + "3456"
 
 def test_failed_telegram_notification_does_not_undo_successful_booking(protect_production_excel, monkeypatch):

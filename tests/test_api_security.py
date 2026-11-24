@@ -47,6 +47,11 @@ def test_api_make_call_requires_authentication(client: TestClient, monkeypatch):
     res_bad = client.post("/api/make-call?to_number=+919829012345", headers={"X-Admin-Key": "bad_key"})
     assert res_bad.status_code == 401
 
+    # 3. Valid key but missing to_number -> HTTP 400 Bad Request
+    res_no_num = client.post("/api/make-call", headers={"X-Admin-Key": TEST_ADMIN_KEY})
+    assert res_no_num.status_code == 400
+    assert "required" in res_no_num.json().get("error", "").lower()
+
 def test_api_clinic_profile_modification_requires_auth(client: TestClient, monkeypatch):
     """
     Sub-Phase D Requirement:

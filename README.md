@@ -22,7 +22,7 @@ Patients call a phone number, and an intelligent AI receptionist (Maya) converse
 
 4. **Twilio Voice Integration**:
    - Supports inbound calls to Twilio number: `+1 (737) 250-8034`.
-   - Supports 1-click outbound calls to patient's verified mobile (`+918824466229`).
+   - Supports 1-click outbound calls to patient's verified mobile (`+919876543210`).
 
 5. **Built-in Web Dashboard & Chat Simulator**:
    - Test in the browser at `http://localhost:8000/`.
@@ -59,5 +59,5 @@ Open Telegram and search for: **`@Frontt_Desk_Bot`**
 Tap **Start** (or send any message). The backend will auto-detect your chat ID!
 
 ### Step 5: Test Call
-- **Option A (Browser Dashboard):** Open `http://localhost:8000/` in browser, paste your Ngrok URL, and click **"Call My Phone Now"**. Twilio will call your phone `+918824466229`!
+- **Option A (Browser Dashboard):** Open `http://localhost:8000/` in browser, paste your Ngrok URL, and click **"Call My Phone Now"**. Twilio will call your verified phone!
 - **Option B (Direct Dial):** Dial `+17372508034` from your verified phone.

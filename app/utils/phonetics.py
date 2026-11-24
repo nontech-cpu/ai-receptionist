@@ -104,7 +104,7 @@ parse_spoken_phone_number = parse_spoken_hindi_numbers
 def format_digits_for_readback(phone_number: str) -> str:
     """
     Formats a 10-digit number with spaces between each digit for clear TTS speech:
-    e.g. '8824466229' -> '8 8 2 4 4 6 6 2 2 9'
+    e.g. '9876543210' -> '9 8 7 6 5 4 3 2 1 0'
     """
     clean = "".join(ch for ch in phone_number if ch.isdigit())
     return " ".join(clean)

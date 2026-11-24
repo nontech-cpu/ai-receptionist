@@ -244,7 +244,7 @@ async def index(request: Request):
                     <div class="space-y-3">
                         <div>
                             <label class="block text-xs font-medium text-slate-400 mb-1">Target Phone Number (with Country Code):</label>
-                            <input id="targetPhone" type="tel" value="+918824466229" placeholder="+918824466229" 
+                            <input id="targetPhone" type="tel" value="" placeholder="+919876543210" 
                                 class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono">
                         </div>
                         <div>
@@ -257,7 +257,7 @@ async def index(request: Request):
                         <div class="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-[11px] text-amber-300 flex items-start space-x-2">
                             <i class="fa-solid fa-circle-exclamation mt-0.5 text-amber-400 flex-shrink-0"></i>
                             <div>
-                                <span class="font-bold">Twilio Trial Rule:</span> Sirf Twilio Console mein verified numbers (+918824466229 / +918441937079) par hi call lagti hai. Call aane par phone keypad par <strong>'1' dabayein</strong>. Maya turant start ho jayegi!
+                                <span class="font-bold">Twilio Trial Rule:</span> Sirf Twilio Console mein verified phone numbers par hi outbound call lagti hai. Call aane par phone keypad par <strong>'1' dabayein</strong>. Maya turant start ho jayegi!
                             </div>
                         </div>
 
@@ -598,7 +598,7 @@ async def index(request: Request):
         }
 
         async function triggerCall() {
-            let phone = document.getElementById('targetPhone') ? document.getElementById('targetPhone').value.trim() : '+918824466229';
+            let phone = document.getElementById('targetPhone') ? document.getElementById('targetPhone').value.trim() : '';
             let serverUrl = document.getElementById('ngrokUrl').value.trim().replace(/[/]+$/, '');
             const status = document.getElementById('callStatus');
             const btn = document.getElementById('callBtn');

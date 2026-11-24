@@ -26,9 +26,20 @@ HINDI_SPOKEN_NUMBERS: Dict[str, str] = {
     'pachaanwe': '95', 'chhiyaanwe': '96', 'sattaanwe': '97', 'atthaanwe': '98', 'ninyaanwe': '99'
 }
 
+ENGLISH_SPOKEN_NUMBERS: Dict[str, str] = {
+    'zero': '0', 'oh': '0',
+    'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5',
+    'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
+    'ten': '10', 'eleven': '11', 'twelve': '12', 'thirteen': '13', 'fourteen': '14',
+    'fifteen': '15', 'sixteen': '16', 'seventeen': '17', 'eighteen': '18', 'nineteen': '19',
+    'twenty': '20', 'thirty': '30', 'forty': '40', 'fifty': '50',
+    'sixty': '60', 'seventy': '70', 'eighty': '80', 'ninety': '90'
+}
+
 def parse_spoken_hindi_numbers(text: str) -> Optional[str]:
     """
-    Parses spoken Hindi compound numbers or raw digits into a normalized 10-digit mobile number.
+    Parses spoken Hindi & English compound numbers, word digits, or raw digits
+    into a normalized 10-digit mobile number.
     Returns 10-digit string if found, otherwise None.
     """
     if not text:
@@ -44,18 +55,41 @@ def parse_spoken_hindi_numbers(text: str) -> Optional[str]:
             if candidate[0] in "6789":
                 return candidate
 
-    # Parse spoken compound words
-    words = text.lower().replace("-", " ").split()
+    # Parse spoken words (Hindi + English)
+    words = text.lower().replace("-", " ").replace(".", " ").split()
     digits_found = []
-    for w in words:
+    i = 0
+    while i < len(words):
+        w = words[i]
         clean_w = "".join(ch for ch in w if ch.isalnum())
+        
+        # Handle "double" and "triple" (e.g. "double eight" -> "88")
+        if clean_w in ("double", "triple") and i + 1 < len(words):
+            next_w = "".join(ch for ch in words[i+1] if ch.isalnum())
+            digit_val = None
+            if next_w.isdigit():
+                digit_val = next_w
+            elif next_w in ENGLISH_SPOKEN_NUMBERS:
+                digit_val = ENGLISH_SPOKEN_NUMBERS[next_w]
+            elif next_w in HINDI_SPOKEN_NUMBERS:
+                digit_val = HINDI_SPOKEN_NUMBERS[next_w]
+            
+            if digit_val:
+                repeat_count = 2 if clean_w == "double" else 3
+                digits_found.append(digit_val * repeat_count)
+                i += 2
+                continue
+
         if clean_w.isdigit():
             digits_found.append(clean_w)
+        elif clean_w in ENGLISH_SPOKEN_NUMBERS:
+            digits_found.append(ENGLISH_SPOKEN_NUMBERS[clean_w])
         elif clean_w in HINDI_SPOKEN_NUMBERS:
             digits_found.append(HINDI_SPOKEN_NUMBERS[clean_w])
+        i += 1
 
     joined = "".join(digits_found)
-    if len(joined) == 10:
+    if len(joined) == 10 and joined[0] in "6789":
         return joined
     if len(joined) >= 10:
         for idx in range(len(joined) - 9):
@@ -64,6 +98,8 @@ def parse_spoken_hindi_numbers(text: str) -> Optional[str]:
                 return candidate
 
     return None
+
+parse_spoken_phone_number = parse_spoken_hindi_numbers
 
 def format_digits_for_readback(phone_number: str) -> str:
     """

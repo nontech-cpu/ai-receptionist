@@ -22,8 +22,7 @@ http_session.headers.update({"Connection": "close"})
 TOTAL_LLM_TIMEOUT_BUDGET = 3.2
 
 FAST_MODELS = [
-    ("gemini-flash-lite-latest", 2.2),
-    ("gemini-3.5-flash-lite", 1.0)
+    ("gemini-flash-lite-latest", 3.0)
 ]
 
 FALLBACK_LISTENING_CUES = {
@@ -258,8 +257,21 @@ class LLMService:
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         schedule_summary = get_live_schedule_summary()
+
+        # Build persistent known slots summary from conversation memory
+        known_items = []
+        if session.slots.get("patient_name"):
+            known_items.append(f"- Patient Name: {session.slots['patient_name']}")
+        if session.slots.get("symptoms"):
+            known_items.append(f"- Symptoms / Reason: {session.slots['symptoms']}")
+        if session.slots.get("date") or session.slots.get("time_slot"):
+            known_items.append(f"- Preferred Slot: {session.slots.get('date', '')} {session.slots.get('time_slot', '')}".strip())
+        if session.slots.get("phone_number"):
+            known_items.append(f"- Contact Phone: {session.slots['phone_number']}")
+        known_slots_summary = "\n".join(known_items)
+
         lang_directive = f"\nCRITICAL DIRECTIVE: The caller is speaking in {caller_lang}. You MUST reply STRICTLY in {caller_lang}! If ENGLISH, reply 100% in polished English without any Hindi words. If HINGLISH, reply in conversational Roman Hinglish."
-        system_prompt = get_receptionist_prompt(today_str, schedule_summary) + lang_directive
+        system_prompt = get_receptionist_prompt(today_str, schedule_summary, known_slots_summary=known_slots_summary) + lang_directive
 
         include_tools = not session.is_completed
 
@@ -279,20 +291,29 @@ class LLMService:
 
             if func_call:
                 args = func_call.get("args", {})
-                patient_name = args.get("patient_name", "").strip().title()
+                
+                # Extract and preserve patient name without any hardcoded blacklist
+                raw_name = args.get("patient_name", "").strip().title()
+                if raw_name and raw_name not in ("Patient", "None"):
+                    patient_name = raw_name
+                else:
+                    patient_name = session.slots.get("patient_name") or "Patient"
+                session.slots["patient_name"] = patient_name
 
-                # Guard against beverage/brand/food or empty names from STT misinterpretation
-                invalid_names = {"Nescafe", "Coffee", "Tea", "Burger", "Pizza", "Patient", "Unknown", "None", ""}
-                if not patient_name or patient_name in invalid_names:
-                    logger.warning(f"[CALL {call_sid[-6:]}] Invalid or misheard name '{patient_name}'. Asking for clarification.")
-                    if caller_lang == "ENGLISH":
-                        ask_name = "Could you please confirm or clarify the patient's full name?"
-                    elif caller_lang == "HINDI_DEVANAGARI":
-                        ask_name = "कृपया मरीज का पूरा नाम स्पष्ट बताइये?"
-                    else:
-                        ask_name = "Kripya mareez ka poora naam ek baar bata dijiye?"
-                    session_manager.add_model_message(call_sid, ask_name)
-                    return ask_name, False
+                # Extract and preserve symptoms across all turns
+                raw_symptoms = args.get("symptoms", "").strip()
+                if raw_symptoms and raw_symptoms not in ("General Consultation", "None"):
+                    symptoms = raw_symptoms
+                else:
+                    symptoms = session.slots.get("symptoms") or "General Consultation"
+                session.slots["symptoms"] = symptoms
+
+                # Extract and preserve date and time slot
+                date_val = args.get("date") or session.slots.get("date") or today_str
+                slot = args.get("time_slot") or session.slots.get("time_slot") or "11:00 AM"
+                session.slots["date"] = date_val
+                session.slots["time_slot"] = slot
+                duration = args.get("duration", "Recently noticed")
 
                 # Clean contact number & strictly guard against Twilio trunk bot numbers
                 raw_phone = str(args.get("phone_number") or "")
@@ -302,9 +323,9 @@ class LLMService:
                 if clean_digits.endswith("7372212163"):
                     clean_digits = ""
 
-                # If 10-digit phone number is missing, do NOT book with fake digits! Prompt caller!
+                # If 10-digit phone number is missing, prompt caller verbally
                 if len(clean_digits) < 10:
-                    logger.warning(f"[CALL {call_sid[-6:]}] LLM attempted booking without 10-digit phone. Asking caller.")
+                    logger.warning(f"[CALL {call_sid[-6:]}] Booking requested but 10-digit phone missing. Asking caller.")
                     if caller_lang == "ENGLISH":
                         ask_phone = "Could you please share your 10-digit contact mobile number to confirm the booking?"
                     elif caller_lang == "HINDI_DEVANAGARI":
@@ -314,11 +335,8 @@ class LLMService:
                     session_manager.add_model_message(call_sid, ask_phone)
                     return ask_phone, False
 
+                session.slots["phone_number"] = clean_digits
                 readback = " ".join(clean_digits)
-                date_val = args.get("date", today_str)
-                slot = args.get("time_slot", "11:00 AM")
-                symptoms = args.get("symptoms", "General Consultation")
-                duration = args.get("duration", "Recently noticed")
 
                 booking = sheet_service.save_appointment(
                     patient_name=patient_name,

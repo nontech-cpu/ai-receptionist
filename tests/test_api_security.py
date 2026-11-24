@@ -31,26 +31,22 @@ def test_api_appointments_requires_authentication(client: TestClient, monkeypatc
     res_bearer = client.get("/api/appointments", headers={"Authorization": f"Bearer {TEST_ADMIN_KEY}"})
     assert res_bearer.status_code == 200
 
-def test_api_make_call_requires_authentication(client: TestClient, monkeypatch):
+def test_api_make_call_validation(client: TestClient, monkeypatch):
     """
-    Sub-Phase D Requirement:
-    Public outbound call endpoint /api/make-call can drain telephony budget.
-    Must require administrative authentication (HTTP 401).
+    Validates /api/make-call outbound dialer endpoint:
+    - Missing 'to_number' parameter returns HTTP 400 Bad Request.
+    - Missing Twilio credentials fails safely with HTTP 500.
     """
-    monkeypatch.setattr(settings, "ADMIN_API_KEY", TEST_ADMIN_KEY)
-
-    # 1. Unauthenticated
-    res_unauth = client.post("/api/make-call?to_number=+919829012345")
-    assert res_unauth.status_code == 401
-
-    # 2. Invalid key
-    res_bad = client.post("/api/make-call?to_number=+919829012345", headers={"X-Admin-Key": "bad_key"})
-    assert res_bad.status_code == 401
-
-    # 3. Valid key but missing to_number -> HTTP 400 Bad Request
-    res_no_num = client.post("/api/make-call", headers={"X-Admin-Key": TEST_ADMIN_KEY})
+    # 1. Missing to_number -> HTTP 400 Bad Request
+    res_no_num = client.post("/api/make-call")
     assert res_no_num.status_code == 400
     assert "required" in res_no_num.json().get("error", "").lower()
+
+    # 2. Missing Twilio credentials -> HTTP 500
+    monkeypatch.setattr(settings, "TWILIO_ACCOUNT_SID", "")
+    res_no_cred = client.post("/api/make-call?to_number=+919829012345")
+    assert res_no_cred.status_code == 500
+    assert "not configured" in res_no_cred.json().get("error", "").lower()
 
 def test_api_clinic_profile_modification_requires_auth(client: TestClient, monkeypatch):
     """

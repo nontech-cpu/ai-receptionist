@@ -628,7 +628,7 @@ async def index(request: Request):
                     status.innerText = `Ring sent! Calling from ${data.from}. Pick up and press '1' to start talking!`;
                 } else {
                     status.className = 'text-xs text-center text-red-400 mt-2 block';
-                    status.innerText = data.error || 'Failed to call.';
+                    status.innerText = data.error || data.detail || 'Failed to call.';
                 }
             } catch (e) {
                 status.className = 'text-xs text-center text-red-400 mt-2 block';

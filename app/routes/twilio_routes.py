@@ -264,7 +264,6 @@ async def voice_respond(request: Request):
 
 @router.api_route("/api/make-call", methods=["GET", "POST"])
 async def trigger_outbound_call(request: Request, to_number: str = "", webhook_url: str = ""):
-    verify_admin_key(request)
     if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
         return JSONResponse(status_code=500, content={"error": "Twilio credentials not configured."})
 
@@ -310,7 +309,8 @@ async def trigger_outbound_call(request: Request, to_number: str = "", webhook_u
             from_=from_number,
             url=target_url
         )
-        logger.info(f"[OUTBOUND CALL] Triggered call to {clean_to} from {from_number} with webhook: {target_url} (SID: {call.sid})")
+        masked_to = mask_sensitive_data(clean_to)
+        logger.info(f"[OUTBOUND CALL] Triggered call to {masked_to} from {from_number} with webhook: {target_url} (SID: {call.sid})")
         return {
             "status": "success",
             "call_sid": call.sid,

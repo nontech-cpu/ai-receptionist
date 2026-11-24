@@ -124,11 +124,20 @@ async def voice_incoming(request: Request):
     data = await extract_request_data(request)
     call_sid = data.get("CallSid", "unknown_call")
     caller_phone = data.get("From", "")
+    to_phone = data.get("To", "")
+    direction = data.get("Direction", "")
+    twilio_bot_num = settings.TWILIO_PHONE_NUMBER or "+17372212163"
+
+    # In outbound calls from Twilio, 'From' is Twilio trunk (+17372212163) and 'To' is the patient!
+    if caller_phone.endswith("7372212163") or caller_phone == twilio_bot_num or "outbound" in direction.lower():
+        patient_phone = to_phone
+    else:
+        patient_phone = caller_phone
 
     base_url = get_base_url(request)
-    print(f"\n[CALL ANSWERED] CallSid={call_sid[-6:]}, From={caller_phone}, Method={request.method}")
+    print(f"\n[CALL ANSWERED] CallSid={call_sid[-6:]}, PatientPhone={patient_phone}, Method={request.method}")
 
-    session = session_manager.get_or_create(call_sid, caller_phone)
+    session = session_manager.get_or_create(call_sid, patient_phone)
     greeting = get_initial_greeting()
     session.silence_count = 0
     session_manager.add_model_message(call_sid, greeting)

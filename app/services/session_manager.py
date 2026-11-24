@@ -18,7 +18,7 @@ class CallSession:
     is_completed: bool = False
     appointment_data: Optional[dict] = None
     silence_count: int = 0  # Tracks consecutive silence gaps
-    language: str = "HINDI"  # Persists caller conversation language
+    language: str = "ENGLISH"  # Persists caller conversation language (sticky session memory)
     created_at: datetime = field(default_factory=datetime.now)
     last_active: datetime = field(default_factory=datetime.now)
 
@@ -34,7 +34,8 @@ class SessionManager:
             )
             if caller_phone:
                 digits = "".join(c for c in caller_phone if c.isdigit())
-                if len(digits) >= 10:
+                # Never assign Twilio bot trunk number to patient phone slot
+                if len(digits) >= 10 and not digits.endswith("7372212163"):
                     session.slots["phone_number"] = digits[-10:]
             self._sessions[call_sid] = session
         else:
@@ -43,7 +44,7 @@ class SessionManager:
             if caller_phone and not session.caller_phone:
                 session.caller_phone = caller_phone
                 digits = "".join(c for c in caller_phone if c.isdigit())
-                if len(digits) >= 10 and not session.slots.get("phone_number"):
+                if len(digits) >= 10 and not digits.endswith("7372212163") and not session.slots.get("phone_number"):
                     session.slots["phone_number"] = digits[-10:]
         return self._sessions[call_sid]
 

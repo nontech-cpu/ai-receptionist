@@ -51,17 +51,17 @@ TOOLS_DEFINITION = [
         "function_declarations": [
             {
                 "name": "book_appointment",
-                "description": "Confirm and record patient appointment into the clinic database. ONLY call when caller has verbally confirmed name, symptoms, date, and preferred time slot.",
+                "description": "Confirm and record patient appointment into the clinic database. ONLY call when patient full name, symptoms, date & time slot within working hours, and 10-digit mobile number have all been verbally provided by caller.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "patient_name": {
                             "type": "STRING",
-                            "description": "Actual human full name of the patient (e.g. Sunil, Devendra, Anita, Neeraj). Never relation words like 'dost' or illness words like 'cough'."
+                            "description": "Actual human full name of the patient (e.g. Sunil, Devendra, Anita, Neeraj). Never food, drink, brand, or illness words like 'Nescafe' or 'Coffee'."
                         },
                         "phone_number": {
                             "type": "STRING",
-                            "description": "10-digit contact mobile number for the patient"
+                            "description": "10-digit contact mobile number verbally provided by the caller. REQUIRED before booking."
                         },
                         "date": {
                             "type": "STRING",
@@ -69,7 +69,7 @@ TOOLS_DEFINITION = [
                         },
                         "time_slot": {
                             "type": "STRING",
-                            "description": "Selected time slot e.g. 11:00 AM, 11:15 AM, 06:00 PM, 06:30 PM, 07:15 PM. ONLY fill if explicitly chosen or agreed by caller. Do not guess."
+                            "description": "Selected time slot within clinic sessions: 11:00 AM - 02:00 PM or 06:00 PM - 08:00 PM (e.g. 11:00 AM, 11:15 AM, 06:00 PM, 06:30 PM, 07:30 PM). ONLY fill if explicitly chosen or agreed by caller. Do not guess."
                         },
                         "symptoms": {
                             "type": "STRING",
@@ -80,7 +80,7 @@ TOOLS_DEFINITION = [
                             "description": "Duration of symptoms e.g. '10 days', '2 days', 'since yesterday'"
                         }
                     },
-                    "required": ["patient_name", "date", "time_slot", "symptoms"]
+                    "required": ["patient_name", "date", "time_slot", "phone_number", "symptoms"]
                 }
             }
         ]
@@ -101,21 +101,50 @@ def is_devanagari_text(text: str) -> bool:
     """Detects if text contains native Devanagari script."""
     return any('\u0900' <= char <= '\u097f' for char in text)
 
-def detect_caller_language(text: str) -> str:
-    """Detects whether text is English, Devanagari Hindi, or Hinglish."""
+def detect_caller_language(text: str, current_lang: str = "ENGLISH") -> str:
+    """
+    Industry-standard language detection with persistent session memory.
+    Short slot replies (numbers, times, symptoms, names) inherit current session language.
+    Only shifts language when clear intent/markers in the target language are detected.
+    """
+    if not text:
+        return current_lang
     if is_devanagari_text(text):
         return "HINDI_DEVANAGARI"
 
-    words = set(text.lower().split())
-    hinglish_markers = {"hai", "hain", "karna", "chahiye", "mera", "meri", "mere", "mujhe", "baje", "naam", "theek", "nahi", "nahin", "kripya", "aaj", "kal", "subah", "shaam", "sham"}
-    if words & hinglish_markers:
+    clean = text.lower().strip()
+    words = set(clean.replace('-', ' ').replace(',', ' ').replace('.', ' ').split())
+
+    hinglish_markers = {
+        "hai", "hain", "karna", "chahiye", "mera", "meri", "mere", "mujhe", "baje",
+        "naam", "theek", "nahi", "nahin", "kripya", "aaj", "kal", "subah", "shaam",
+        "sham", "bhai", "shukriya", "dost", "samay", "kijiye", "bataiye", "hoga",
+        "bhi", "kuch", "kitna", "kitne", "kahan", "kaha", "dast", "dard", "pet", "bukhar",
+        "namaste", "namaskar", "batao", "milna", "chahata", "chahati", "dhanyawad"
+    }
+
+    english_markers = {
+        "i", "want", "need", "appointment", "doctor", "fever", "cough", "cold",
+        "tomorrow", "today", "morning", "evening", "hello", "hi", "hey", "what",
+        "where", "how", "please", "book", "is", "my", "name", "can", "could", "would",
+        "at", "pm", "am", "yes", "no", "yeah", "yep", "sure", "fine", "okay", "ok",
+        "number", "phone", "for", "the", "thanks", "thank", "clinic", "visit", "checkup"
+    }
+
+    has_hinglish = bool(words & hinglish_markers)
+    has_english = bool(words & english_markers)
+
+    if has_hinglish and not has_english:
         return "HINGLISH"
-
-    english_markers = {"i", "want", "need", "appointment", "doctor", "fever", "cough", "tomorrow", "today", "morning", "evening", "hello", "hi", "what", "where", "how", "please", "book", "is", "my", "name", "can"}
-    if words & english_markers:
+    elif has_english and not has_hinglish:
         return "ENGLISH"
+    elif has_hinglish and has_english:
+        h_count = sum(1 for w in words if w in hinglish_markers)
+        e_count = sum(1 for w in words if w in english_markers)
+        return "HINGLISH" if h_count > e_count else "ENGLISH"
 
-    return "HINGLISH"
+    # Ambiguous, digits, times, names, or short answers inherit active conversation language!
+    return current_lang
 
 def get_live_schedule_summary() -> str:
     """Generates real-time 3-day continuous schedule summary for prompt injection."""
@@ -191,23 +220,27 @@ class LLMService:
         """
         Industry-standard Voice AI turn processor.
         Empowers Gemini LLM with complete semantic understanding and autonomous tool execution.
-        Eliminates 100% of brittle keyword intercepts and preserves multi-turn memory.
+        Preserves multi-turn sticky session language and enforces real patient data collection.
         """
         session = session_manager.get_or_create(call_sid)
         user_lower = user_speech.lower().strip()
-        caller_lang = detect_caller_language(user_speech)
-        session.language = caller_lang
 
-        # Parse spoken 10-digit mobile number if caller speaks one
+        # Sticky multi-turn session language memory
+        current_lang = getattr(session, "language", "ENGLISH")
+        session.language = detect_caller_language(user_speech, current_lang)
+        caller_lang = session.language
+
+        # Parse spoken 10-digit mobile number if caller speaks one (never store Twilio trunk)
         spoken_phone = parse_spoken_hindi_numbers(user_speech)
-        if spoken_phone:
+        if spoken_phone and not spoken_phone.endswith("7372212163"):
+            session.slots["phone_number"] = spoken_phone
             session.caller_phone = spoken_phone
             logger.info(f"[CALL {call_sid[-6:]}] Extracted Spoken 10-digit Phone: {spoken_phone}")
 
         # Check if caller wants to gracefully end call after booking is completed
         if session.is_completed:
-            closing_cues = ["nahi", "no", "bas", "bus", "thank", "dhanyawad", "shukriya", "bye", "goodbye", "done", "all set"]
-            has_question = any(q in user_lower for q in ["kya", "kitna", "kitne", "kab", "kahan", "kaha", "fee", "fees", "address", "timing", "cost", "pata", "doctor"])
+            closing_cues = ["nahi", "no", "bas", "bus", "thank", "dhanyawad", "shukriya", "bye", "goodbye", "done", "all set", "that's all", "nothing"]
+            has_question = any(q in user_lower for q in ["kya", "kitna", "kitne", "kab", "kahan", "kaha", "fee", "fees", "address", "timing", "cost", "pata", "doctor", "where", "how much"])
             is_closing = any(c in user_lower for c in closing_cues) and not has_question
             if is_closing:
                 if caller_lang == "ENGLISH":
@@ -246,17 +279,42 @@ class LLMService:
 
             if func_call:
                 args = func_call.get("args", {})
-                patient_name = args.get("patient_name", "Patient").strip().title()
+                patient_name = args.get("patient_name", "").strip().title()
 
-                # Clean contact number
+                # Guard against beverage/brand/food or empty names from STT misinterpretation
+                invalid_names = {"Nescafe", "Coffee", "Tea", "Burger", "Pizza", "Patient", "Unknown", "None", ""}
+                if not patient_name or patient_name in invalid_names:
+                    logger.warning(f"[CALL {call_sid[-6:]}] Invalid or misheard name '{patient_name}'. Asking for clarification.")
+                    if caller_lang == "ENGLISH":
+                        ask_name = "Could you please confirm or clarify the patient's full name?"
+                    elif caller_lang == "HINDI_DEVANAGARI":
+                        ask_name = "कृपया मरीज का पूरा नाम स्पष्ट बताइये?"
+                    else:
+                        ask_name = "Kripya mareez ka poora naam ek baar bata dijiye?"
+                    session_manager.add_model_message(call_sid, ask_name)
+                    return ask_name, False
+
+                # Clean contact number & strictly guard against Twilio trunk bot numbers
                 raw_phone = str(args.get("phone_number") or "")
                 clean_digits = "".join(ch for ch in raw_phone if ch.isdigit())
-                if len(clean_digits) < 10 and session.caller_phone:
-                    clean_digits = "".join(ch for ch in session.caller_phone if ch.isdigit())[-10:]
-                if not clean_digits:
-                    clean_digits = "9999999999"
-                readback = " ".join(clean_digits)
+                if (len(clean_digits) < 10 or clean_digits.endswith("7372212163")) and session.slots.get("phone_number"):
+                    clean_digits = session.slots["phone_number"]
+                if clean_digits.endswith("7372212163"):
+                    clean_digits = ""
 
+                # If 10-digit phone number is missing, do NOT book with fake digits! Prompt caller!
+                if len(clean_digits) < 10:
+                    logger.warning(f"[CALL {call_sid[-6:]}] LLM attempted booking without 10-digit phone. Asking caller.")
+                    if caller_lang == "ENGLISH":
+                        ask_phone = "Could you please share your 10-digit contact mobile number to confirm the booking?"
+                    elif caller_lang == "HINDI_DEVANAGARI":
+                        ask_phone = "अपॉइंटमेंट पक्का करने के लिए कृपया अपना 10 अंकों का मोबाइल नंबर बताइये।"
+                    else:
+                        ask_phone = "Appointment confirm karne ke liye kripya apna 10-digit mobile number bata dijiye."
+                    session_manager.add_model_message(call_sid, ask_phone)
+                    return ask_phone, False
+
+                readback = " ".join(clean_digits)
                 date_val = args.get("date", today_str)
                 slot = args.get("time_slot", "11:00 AM")
                 symptoms = args.get("symptoms", "General Consultation")
@@ -282,7 +340,7 @@ class LLMService:
 
                 clean_slot = slot.replace(":00", "")
 
-                # Format spoken confirmation in natural conversational style matching caller's language
+                # Format spoken confirmation strictly in active conversation language
                 if caller_lang == "ENGLISH":
                     doc = clinic_service.profile.doctor_name
                     spoken_text = (
@@ -318,7 +376,7 @@ class LLMService:
 
         except Exception as e:
             logger.warning(f"[CALL {call_sid[-6:]}] LLM budget or error ({e}). Returning natural dynamic listening cue.")
-            cues = FALLBACK_LISTENING_CUES.get(caller_lang, FALLBACK_LISTENING_CUES["HINGLISH"])
+            cues = FALLBACK_LISTENING_CUES.get(caller_lang, FALLBACK_LISTENING_CUES["ENGLISH"])
             idx = getattr(session, "fallback_idx", 0)
             fallback = cues[idx % len(cues)]
             session.fallback_idx = idx + 1

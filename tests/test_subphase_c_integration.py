@@ -8,6 +8,7 @@ from app.services.session_manager import session_manager
 from app.services.sheet_service import sheet_service
 from app.services.telegram_service import telegram_service
 from app.services.state_machine import SessionState
+from app.core.config import settings
 
 def test_complete_english_booking_flow(monkeypatch, protect_production_excel, mock_external_services):
     """
@@ -271,6 +272,7 @@ def test_availability_changing_before_confirmation(monkeypatch, protect_producti
     If another patient books the slot while caller is awaiting confirmation,
     revalidation before booking catches the collision and offers alternatives.
     """
+    monkeypatch.setattr(settings, "ENABLE_SLOT_CONFLICT_CHECK", True)
     temp_excel = protect_production_excel
     call_sid = "test_avail_race_005"
     tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")

@@ -50,8 +50,9 @@ REJECTION_WORDS = {
 WRAPUP_WORDS = {
     "thanks", "thank you", "bye", "goodbye", "bas", "bus", "nothing",
     "nothing else", "all set", "dhanyawad", "shukriya", "that's all", "thats all",
+    "no", "nope", "nahi", "nahin", "na", "kuch nahi", "nahi chahiye", "kuch nahi chahiye", "nahi bas",
     # Devanagari
-    "धन्यवाद", "शुक्रिया", "बस", "नमस्ते"
+    "धन्यवाद", "शुक्रिया", "बस", "नमस्ते", "नहीं", "कुछ नहीं", "ना", "नहीं चाहिए"
 }
 
 class ReceptionistStateMachine:
@@ -87,7 +88,13 @@ class ReceptionistStateMachine:
     def is_wrapup(text: str) -> bool:
         clean = re.sub(r'[,.?!।\-\'\"`~#*;:\(\)]', ' ', text).lower().strip()
         words = set(clean.split())
-        return bool(words & WRAPUP_WORDS)
+        if words & WRAPUP_WORDS:
+            return True
+        return any(phrase in clean for phrase in [
+            "thank you", "that's all", "thats all", "kuch nahi", "nahi chahiye",
+            "kuch nahi chahiye", "call end", "call disconnect", "bas itna hi",
+            "कुछ नहीं", "नहीं चाहिए", "बस इतना ही"
+        ])
 
     @staticmethod
     def clean_slot_value(slot_name: str, value: Any) -> Optional[str]:
@@ -218,7 +225,7 @@ class ReceptionistStateMachine:
         if lang == "ENGLISH":
             return (
                 f"I have noted an appointment for {name} with {doc_name} on {friendly_date} at {time_str} "
-                f"for {symptoms}. Registered contact number is {spaced_phone}. Shall I go ahead and confirm this booking?"
+                f"for {symptoms}. Contact number is {spaced_phone}. Shall I go ahead and confirm this booking?"
             )
         elif lang == "HINDI_DEVANAGARI":
             return (

@@ -6,6 +6,7 @@ import pytest
 from app.services.state_machine import state_machine, SessionState
 from app.services.session_manager import session_manager, CallSession
 from app.services.sheet_service import sheet_service
+from app.core.config import settings
 
 def test_slots_collected_in_different_turn_orders(protect_production_excel):
     """
@@ -266,12 +267,13 @@ def test_duplicate_call_sid_after_simulated_application_restart(protect_producti
     wb.close()
     assert len(rows) == 2, f"Expected 2 rows (1 header + 1 record), found {len(rows)}"
 
-def test_two_simultaneous_callers_requesting_same_slot_concurrency(protect_production_excel):
+def test_two_simultaneous_callers_requesting_same_slot_concurrency(protect_production_excel, monkeypatch):
     """
     Sub-Phase B Requirement:
     Two simultaneous callers requesting the same slot under cross-process file lock.
     Exactly one must succeed, and one must be rejected.
     """
+    monkeypatch.setattr(settings, "ENABLE_SLOT_CONFLICT_CHECK", True)
     tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
     target_slot = "12:30 PM"
 

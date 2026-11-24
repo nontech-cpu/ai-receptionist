@@ -8,6 +8,7 @@ from app.services.session_manager import session_manager
 from app.services.llm_service import llm_service
 from app.services.sheet_service import sheet_service
 from app.services.clinic_service import clinic_service
+from app.core.config import settings
 
 def test_spoken_hindi_and_english_phone_numbers():
     """
@@ -234,7 +235,7 @@ def test_afternoon_break_rejected(monkeypatch, protect_production_excel):
 
     assert len(rows) == 1, "CLINIC BREAK VIOLATION: Appointment booked during 2:00 PM - 6:00 PM break!"
 
-def test_double_booking_same_slot_rejected(protect_production_excel):
+def test_double_booking_same_slot_rejected(protect_production_excel, monkeypatch):
     """
     Scenario X: Double booking detection.
     When a slot (e.g. 2026-11-25 11:00 AM) is already booked, saving the exact same slot
@@ -243,6 +244,7 @@ def test_double_booking_same_slot_rejected(protect_production_excel):
     NOTE: On current un-repaired codebase, SheetService.save_appointment does NOT check
     for existing bookings before appending!
     """
+    monkeypatch.setattr(settings, "ENABLE_SLOT_CONFLICT_CHECK", True)
     temp_excel = protect_production_excel
     
     # Book first appointment

@@ -20,7 +20,10 @@ class Settings:
     # Speech Recognition & Confidence Thresholds
     STT_HIGH_CONFIDENCE_THRESHOLD: float = float(os.getenv("STT_HIGH_CONFIDENCE_THRESHOLD", "0.80"))
     STT_MEDIUM_CONFIDENCE_THRESHOLD: float = float(os.getenv("STT_MEDIUM_CONFIDENCE_THRESHOLD", "0.55"))
-    STT_LOW_CONFIDENCE_THRESHOLD: float = float(os.getenv("STT_LOW_CONFIDENCE_THRESHOLD", "0.35"))
+    STT_LOW_CONFIDENCE_THRESHOLD: float = float(os.getenv("STT_LOW_CONFIDENCE_THRESHOLD", "0.25"))
+
+    # Slot Conflict & Overlap Enforcement (Default False for doctor testing/demos)
+    ENABLE_SLOT_CONFLICT_CHECK: bool = os.getenv("ENABLE_SLOT_CONFLICT_CHECK", "false").lower() in ("true", "1")
 
     # Twilio
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")

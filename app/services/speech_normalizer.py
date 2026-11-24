@@ -233,6 +233,66 @@ class SpeechNormalizer:
                     return info["canonical"]
         return None
 
+    @classmethod
+    def is_semantically_meaningful(cls, text: str) -> bool:
+        """
+        Industry-grade Dual-Gate STT Filter:
+        Checks whether an utterance contains real spoken words or semantic tokens.
+        If true, the system MUST NOT drop the transcript simply because raw telephone
+        SNR confidence was < threshold (e.g. 0.25 or 0.00 from Twilio en-IN models on Hindi).
+        """
+        if not text:
+            return False
+        clean = text.lower().strip()
+
+        # If audio contains simulated or detected line noise / static hiss (e.g. "shhh", "kzzzz")
+        if re.search(r'\b(?:sh+h+|kz+z+|static|hiss)\b', clean):
+            return False
+
+        # 1. Native Devanagari script is always genuine speech
+        if any('\u0900' <= char <= '\u097f' for char in clean):
+            return True
+
+        # 2. Contains digits or numbers (e.g. 6:20, 730, 7:30, 5, 11)
+        if re.search(r'\d+', clean):
+            return True
+
+        # Extract words
+        words = set(re.findall(r'\b[a-zA-Z\']+\b', clean))
+        if not words:
+            return False
+
+        # 3. Contains time/date tokens
+        time_tokens = {"am", "pm", "baje", "shaam", "sham", "subah", "dophar", "aaj", "kal", "today", "tomorrow"}
+        if words & time_tokens:
+            return True
+
+        # 4. Contains affirmative / rejection / booking / action tokens
+        action_tokens = {
+            "han", "haan", "haanji", "hanji", "yes", "yeah", "yep", "theek", "theek hai",
+            "kar do", "kardo", "kar dijiye", "pakka", "sahi", "nahi", "nahin", "no", "nope",
+            "mat", "badlo", "cancel", "confirm", "book", "appointment", "doctor"
+        }
+        for token in action_tokens:
+            if token in clean:
+                return True
+
+        # 5. Contains clinical symptoms or query tokens
+        domain_tokens = {
+            "cough", "cold", "fever", "bukhar", "khansi", "sardi", "jukam", "dard", "pet",
+            "sir", "gala", "ulti", "dast", "kamzori", "checkup", "fees", "fee", "paise",
+            "address", "milna", "dikhaana"
+        }
+        if words & domain_tokens:
+            return True
+
+        # 6. Language indication phrases (e.g. "Main Hindi mein bol raha hun")
+        lang_tokens = {"hindi", "english", "bol", "bolte", "bhasha"}
+        if words & lang_tokens:
+            return True
+
+        return False
+
     # --- Benchmark Evaluation Metrics (WER & CER) ---
     @staticmethod
     def calculate_levenshtein_distance(seq1: List[str], seq2: List[str]) -> int:

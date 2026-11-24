@@ -106,6 +106,7 @@ def detect_caller_language(text: str, current_lang: str = "ENGLISH") -> str:
     """
     Industry-standard language detection with persistent sticky session memory.
     Only shifts language when clear intent/markers in the target language are detected.
+    Prevents single loanwords like 'book', 'doctor', 'pm', 'am' from flipping Hindi/Hinglish to English.
     """
     if not text:
         return current_lang
@@ -120,15 +121,19 @@ def detect_caller_language(text: str, current_lang: str = "ENGLISH") -> str:
         "naam", "theek", "nahi", "nahin", "kripya", "aaj", "kal", "subah", "shaam",
         "sham", "bhai", "shukriya", "dost", "samay", "kijiye", "bataiye", "hoga",
         "bhi", "kuch", "kitna", "kitne", "kahan", "kaha", "dast", "dard", "pet", "bukhar",
-        "namaste", "namaskar", "batao", "milna", "chahata", "chahati", "dhanyawad"
+        "namaste", "namaskar", "batao", "milna", "chahata", "chahati", "dhanyawad",
+        "kar", "do", "kardo", "kariye", "karwana", "karwa", "karvana", "par", "pe",
+        "ko", "se", "mein", "me", "ka", "ki", "ke", "unka", "unki", "unke", "sahab", "saheb",
+        "main", "mai", "hum", "hindi", "bol", "raha", "rahi", "rahe", "hun", "hoon",
+        "suno", "sun", "aap", "aapka", "aapki", "aapke", "tum", "kya", "kyu", "kyun",
+        "kaise", "kisko", "kisse", "bolo", "boliye"
     }
 
     english_markers = {
-        "i", "want", "need", "appointment", "doctor", "fever", "cough", "cold",
-        "tomorrow", "today", "morning", "evening", "hello", "hi", "hey", "what",
-        "where", "how", "please", "book", "is", "my", "name", "can", "could", "would",
-        "at", "pm", "am", "yes", "no", "yeah", "yep", "sure", "fine", "okay", "ok",
-        "number", "phone", "for", "the", "thanks", "thank", "clinic", "visit", "checkup"
+        "i", "want", "need", "fever", "cough", "cold",
+        "tomorrow", "today", "morning", "evening", "hello", "what",
+        "where", "how", "please", "is", "my", "name", "can", "could", "would",
+        "for", "the", "thanks", "thank", "visit", "schedule", "prefer", "available"
     }
 
     has_hinglish = bool(words & hinglish_markers)
@@ -137,11 +142,14 @@ def detect_caller_language(text: str, current_lang: str = "ENGLISH") -> str:
     if has_hinglish and not has_english:
         return "HINGLISH"
     elif has_english and not has_hinglish:
+        # If currently in Hinglish/Hindi, don't flip to English unless multiple English words are used
+        if current_lang in ("HINGLISH", "HINDI_DEVANAGARI") and len(words & english_markers) < 2:
+            return current_lang
         return "ENGLISH"
     elif has_hinglish and has_english:
         h_count = sum(1 for w in words if w in hinglish_markers)
         e_count = sum(1 for w in words if w in english_markers)
-        return "HINGLISH" if h_count > e_count else "ENGLISH"
+        return "HINGLISH" if h_count >= e_count else "ENGLISH"
 
     return current_lang
 
@@ -149,13 +157,17 @@ def get_live_schedule_summary() -> str:
     """Generates continuous schedule summary for prompt injection."""
     today = datetime.now()
     schedule_lines = []
+    conflict_enabled = getattr(settings, "ENABLE_SLOT_CONFLICT_CHECK", False)
     for i in range(3):
         day = today + timedelta(days=i)
         day_str = day.strftime("%Y-%m-%d")
         day_name = day.strftime("%A")
         booked = sheet_service.get_booked_slots(day_str)
         label = "Today" if i == 0 else ("Tomorrow" if i == 1 else day_name)
-        booked_info = f"Booked times: [{', '.join(booked)}]" if booked else "All times available within active sessions"
+        if conflict_enabled:
+            booked_info = f"Booked times: [{', '.join(booked)}]" if booked else "All times available within active sessions"
+        else:
+            booked_info = "All times available within active sessions (Testing Mode)"
         schedule_lines.append(f"- {label} ({day_name}, {day_str}): Morning (11:00 AM to 02:00 PM) & Evening (06:00 PM to 08:00 PM). {booked_info}")
     return "\n".join(schedule_lines)
 
@@ -315,19 +327,24 @@ class LLMService:
                 session_manager.add_model_message(call_sid, cleaned)
                 return cleaned, False
 
-        # 4. Low Confidence Gate (Requirement 5)
-        low_threshold = getattr(settings, "STT_LOW_CONFIDENCE_THRESHOLD", 0.35)
+        # 4. Low Confidence Gate (Dual-Gate STT Filter)
+        low_threshold = getattr(settings, "STT_LOW_CONFIDENCE_THRESHOLD", 0.25)
         if confidence is not None and confidence < low_threshold:
-            logger.warning(f"[STT CONFIDENCE] Low confidence score {confidence:.2f} for '{user_speech}'. Asking caller to repeat.")
-            if caller_lang == "ENGLISH":
-                low_msg = "I am having a little trouble hearing you clearly. Could you please repeat that?"
-            elif caller_lang == "HINDI_DEVANAGARI":
-                low_msg = "माफ़ कीजियेगा, फ़ोन लाइन में आवाज़ स्पष्ट नहीं आई। क्या आप दोबारा कह सकते हैं?"
+            # If the utterance contains recognizable semantic entities (numbers, dates, symptoms, yes/no),
+            # DO NOT reject it! PSTN telephone SNR frequently causes confidence ~0.20-0.27 on valid Indian speech.
+            if not speech_normalizer.is_semantically_meaningful(user_speech):
+                logger.warning(f"[STT CONFIDENCE] Low confidence score {confidence:.2f} with no semantic entities for '{user_speech}'. Asking caller to repeat.")
+                if caller_lang == "ENGLISH":
+                    low_msg = "I am having a little trouble hearing you clearly. Could you please repeat that?"
+                elif caller_lang == "HINDI_DEVANAGARI":
+                    low_msg = "माफ़ कीजियेगा, फ़ोन लाइन में आवाज़ स्पष्ट नहीं आई। क्या आप दोबारा कह सकते हैं?"
+                else:
+                    low_msg = "Maaf kariyega, line clear nahi aayi. Kya aap dobara bata sakte hain?"
+                cleaned = clean_for_speech(low_msg)
+                session_manager.add_model_message(call_sid, cleaned)
+                return cleaned, False
             else:
-                low_msg = "Maaf kariyega, line clear nahi aayi. Kya aap dobara bata sakte hain?"
-            cleaned = clean_for_speech(low_msg)
-            session_manager.add_model_message(call_sid, cleaned)
-            return cleaned, False
+                logger.info(f"[STT CONFIDENCE] Bypassing low confidence {confidence:.2f} because speech is semantically meaningful: '{user_speech}'")
 
         # 5. Acoustic Confusion Detection before Normal Slot Extraction (Requirement 3 & 4)
         confusion = speech_normalizer.detect_acoustic_confusion(user_speech, confidence)
@@ -346,7 +363,7 @@ class LLMService:
             state_machine.update_session_slots(session, {"phone_number": spoken_phone})
             session.caller_phone = spoken_phone
 
-        # 7. Post-Booking Call Wrap-Up
+        # 7. Post-Booking State (The booking is ALREADY done. Never re-validate or re-book!)
         if session.is_completed or session.state == SessionState.BOOKING_COMPLETED:
             if state_machine.is_wrapup(user_lower):
                 session.state = SessionState.CALL_WRAPUP
@@ -356,8 +373,71 @@ class LLMService:
                     farewell = "डॉक्टर शर्मा क्लिनिक में कॉल करने के लिए बहुत धन्यवाद। समय से 10 मिनट पहले पधारें। अपना ख्याल रखियेगा, नमस्ते!"
                 else:
                     farewell = "Dr. Sharma clinic mein call karne ke liye shukriya. Samay se 10 minute pehle pahunchein. Apna khayal rakhiye, namaste!"
-                session_manager.add_model_message(call_sid, farewell)
-                return farewell, True
+                cleaned = clean_for_speech(farewell)
+                session_manager.add_model_message(call_sid, cleaned)
+                return cleaned, True
+
+            # The caller is asking a post-booking question (e.g. "fees bata do", "address kya hai", "timing kya hai")
+            # Answer the question directly without touching slots, appointments, or Excel!
+            p = clinic_service.profile
+            reply_text = ""
+
+            # Check direct keywords first for guaranteed 0-latency accuracy
+            fee_amount = getattr(getattr(p, "pricing", None), "consultation_fee", 500)
+            loc_address = getattr(getattr(p, "location", None), "address", "Plot 42, Sector 5, Malviya Nagar, Jaipur")
+            loc_landmark = getattr(getattr(p, "location", None), "landmark", "Near Apex Hospital")
+            work_hours = getattr(getattr(p, "timings", None), "working_hours", "10:00 AM to 08:00 PM")
+
+            if any(w in user_lower for w in ("fee", "fees", "kitne paise", "paise", "charge", "charges", "cost", "rupees", "kitna lagega", "kitna charge")):
+                if caller_lang == "ENGLISH":
+                    reply_text = f"Dr. Sharma's consultation fee is ₹{fee_amount}. Is there anything else you would like to know, or may we conclude the call?"
+                elif caller_lang == "HINDI_DEVANAGARI":
+                    reply_text = f"डॉक्टर शर्मा की कंसल्टेशन फीस ₹{fee_amount} है। क्या आपको कुछ और पूछना है या कॉल समाप्त करें?"
+                else:
+                    reply_text = f"Dr. Sharma ki consultation fee ₹{fee_amount} hai. Kya aapko kuch aur poochna hai ya call end karein?"
+            elif any(w in user_lower for w in ("address", "location", "kahan", "landmark", "rasta", "kidhar")):
+                if caller_lang == "ENGLISH":
+                    reply_text = f"The clinic is located at {loc_address}. Landmark: near {loc_landmark}. Anything else I can help with?"
+                elif caller_lang == "HINDI_DEVANAGARI":
+                    reply_text = f"क्लिनिक का पता {loc_address} है, {loc_landmark} के पास। क्या आपको कुछ और पूछना है?"
+                else:
+                    reply_text = f"Clinic ka address {loc_address} hai, {loc_landmark} ke paas. Kya aapko kuch aur poochna hai?"
+            elif any(w in user_lower for w in ("timing", "timings", "samay", "time", "kab", "open", "close", "hours")):
+                if caller_lang == "ENGLISH":
+                    reply_text = f"Clinic hours are {work_hours}. Anything else I can assist you with?"
+                elif caller_lang == "HINDI_DEVANAGARI":
+                    reply_text = f"क्लिनिक का समय {work_hours} है। क्या आपको कुछ और जानकारी चाहिए?"
+                else:
+                    reply_text = f"Clinic ke timings {work_hours} hain. Kya aapko kuch aur poochna hai?"
+            else:
+                # Ask Gemini conversationally without booking tools
+                try:
+                    system_prompt = (
+                        f"You are Maya, AI receptionist at {p.clinic_name}. The appointment for {session.slots.get('patient_name')} "
+                        f"is ALREADY CONFIRMED and BOOKED. DO NOT book or ask for booking slots. Simply answer the caller's question "
+                        f"politely and concisely in {caller_lang}."
+                    )
+                    gemini_resp = self._call_gemini_api(session.messages, system_prompt, include_tools=False)
+                    cand = gemini_resp.get("candidates", [{}])[0]
+                    parts = cand.get("content", {}).get("parts", [])
+                    for part in parts:
+                        if "text" in part:
+                            reply_text = part["text"]
+                            break
+                except Exception as e:
+                    logger.warning(f"[POST-BOOKING FAQ] Gemini call failed: {e}")
+
+                if not reply_text:
+                    if caller_lang == "ENGLISH":
+                        reply_text = f"Your appointment is all set. The consultation fee is ₹{fee_amount}. Anything else I can help you with?"
+                    elif caller_lang == "HINDI_DEVANAGARI":
+                        reply_text = f"आपका अपॉइंटमेंट पक्का हो चुका है। डॉक्टर की फीस ₹{fee_amount} है। क्या आपको कोई और जानकारी चाहिए?"
+                    else:
+                        reply_text = f"Aapka appointment confirm ho chuka hai. Consultation fee ₹{fee_amount} hai. Kya aapko kuch aur poochna hai?"
+
+            cleaned = clean_for_speech(reply_text)
+            session_manager.add_model_message(call_sid, cleaned)
+            return cleaned, False
 
         logger.info(f"\n[CALL {call_sid[-6:]}] User Said ({caller_lang}, State={session.state}): '{user_speech}'")
 
@@ -477,29 +557,25 @@ class LLMService:
         if state_machine.is_affirmative(user_speech) and not state_machine.is_all_slots_collected(session):
             logger.info(f"[CALL {call_sid[-6:]}] Premature 'yes' ignored. Missing mandatory slots remain.")
 
-        # 7. Check if All 5 Mandatory Slots are Collected
-        if state_machine.is_all_slots_collected(session):
-            session.state = SessionState.VALIDATING
-            date_val = session.slots["appointment_date"]
-            time_val = session.slots["appointment_time"]
+        # 7. Immediate Slot Validation & Smart Alternative Suggestion (Pillar 2 & Pillar 3)
+        candidate_time = session.slots.get("appointment_time")
+        candidate_date = session.slots.get("appointment_date") or datetime.now().strftime("%Y-%m-%d")
 
-            # Validate against clinic rules and existing bookings
-            valid, reason = sheet_service.validate_slot(date_val, time_val)
+        if candidate_time:
+            valid, reason = sheet_service.validate_slot(candidate_date, candidate_time)
             if not valid:
                 logger.warning(f"[CALL {call_sid[-6:]}] Slot validation failed: {reason}")
                 session.set_slot("appointment_time", None)
                 session.state = SessionState.COLLECTING_DETAILS
-                if caller_lang == "ENGLISH":
-                    conflict_reply = f"I apologize, {reason}. Could you please choose another available time or date?"
-                elif caller_lang == "HINDI_DEVANAGARI":
-                    conflict_reply = f"माफ़ कीजियेगा, {reason}। कृपया कोई अन्य समय या तारीख बताइये।"
-                else:
-                    conflict_reply = f"Maaf kariyega, {reason}। Kripya koi doosra samay ya tarikh bata dijiye."
+                alternatives = sheet_service.get_smart_alternative_slots(candidate_date, candidate_time)
+                conflict_reply = sheet_service.format_alternative_slot_prompt(reason, alternatives, caller_lang)
                 cleaned = clean_for_speech(conflict_reply)
                 session_manager.add_model_message(call_sid, cleaned)
                 return cleaned, False
 
-            # Valid -> Enter Awaiting Explicit Confirmation!
+        # 8. Check if All 5 Mandatory Slots are Collected
+        if state_machine.is_all_slots_collected(session):
+            # All 5 slots are validated & collected -> Enter Awaiting Explicit Confirmation!
             session.state = SessionState.AWAITING_EXPLICIT_CONFIRMATION
             session.explicit_confirmation_requested = True
             readback = state_machine.format_readback_prompt(session, caller_lang)
@@ -508,17 +584,23 @@ class LLMService:
             logger.info(f"[CALL {call_sid[-6:]}] Read-back generated: '{cleaned}'")
             return cleaned, False
 
-        # 8. Still Missing Slots -> Ask Caller Naturally
+        # 9. Linear Structured Receptionist Flow for Missing Slots (Pillar 1)
         session.state = SessionState.COLLECTING_DETAILS
         missing = state_machine.get_missing_slots(session)
         logger.info(f"[CALL {call_sid[-6:]}] Still missing slots: {missing}")
 
+        # Deterministic linear priority: patient_name -> symptoms -> appointment_date/time -> phone_number
+        linear_order = ["patient_name", "symptoms", "appointment_date", "appointment_time", "phone_number"]
+        next_missing = "patient_name"
+        for m in linear_order:
+            if m in missing:
+                next_missing = m
+                break
+
         # If LLM answered a FAQ question (e.g. fees, address), use LLM response and prompt for next missing slot
-        if direct_text and len(direct_text.strip()) > 3:
+        if direct_text and len(direct_text.strip()) > 3 and not any(w in direct_text.lower() for w in ("already booked", "overlaps", "maaf kariyega")):
             spoken_text = direct_text
         else:
-            # Deterministic missing slot prompts
-            next_missing = missing[0]
             spoken_text = self._get_missing_slot_prompt(next_missing, caller_lang)
 
         cleaned = clean_for_speech(spoken_text)

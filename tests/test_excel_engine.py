@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.services.sheet_service import sheet_service
+from app.core.config import settings
 
 def test_excel_call_sid_idempotency(protect_production_excel):
     """
@@ -43,7 +44,7 @@ def test_excel_call_sid_idempotency(protect_production_excel):
 
     assert len(rows) == 2, f"Idempotency failure: Expected 2 rows in Excel, found {len(rows)}"
 
-def test_interval_overlap_detection_30_minutes(protect_production_excel):
+def test_interval_overlap_detection_30_minutes(protect_production_excel, monkeypatch):
     """
     Sub-Phase A Requirement:
     Validate complete 30-minute appointment interval against overlapping bookings.
@@ -51,6 +52,7 @@ def test_interval_overlap_detection_30_minutes(protect_production_excel):
     Attempting to book 11:15 AM (11:15 - 11:45 AM) must be rejected due to overlap.
     Booking 11:30 AM (11:30 - 12:00 PM) must succeed.
     """
+    monkeypatch.setattr(settings, "ENABLE_SLOT_CONFLICT_CHECK", True)
     temp_excel = protect_production_excel
     tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 

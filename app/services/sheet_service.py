@@ -184,35 +184,36 @@ class SheetService:
                 return False, "Doctor is unavailable during the afternoon break (02:00 PM to 06:00 PM). Clinic reopens at 06:00 PM."
             return False, "Requested time is outside clinic hours. Working hours are Morning 11:00 AM to 02:00 PM and Evening 06:00 PM to 08:00 PM."
 
-        # 4. Overlap & Double Booking Detection from live worksheet
-        target_date = date_str.strip()
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if not row or not any(row):
-                continue
-
-            raw_date = row[4]
-            if isinstance(raw_date, (datetime, date)):
-                row_date = raw_date.strftime("%Y-%m-%d")
-            else:
-                row_date = str(raw_date or "").strip()
-
-            raw_time = row[5]
-            if isinstance(raw_time, time):
-                row_time = raw_time.strftime("%I:%M %p")
-            else:
-                row_time = str(raw_time or "").strip()
-
-            status = str(row[9] or "").strip().lower() if len(row) > 9 else "confirmed"
-
-            if row_date == target_date and status != "cancelled":
-                b_time = self.parse_time_str(row_time)
-                if not b_time:
+        # 4. Overlap & Double Booking Detection from live worksheet (Bypassable for testing/demos)
+        if getattr(settings, "ENABLE_SLOT_CONFLICT_CHECK", False):
+            target_date = date_str.strip()
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not row or not any(row):
                     continue
-                b_start = datetime(2000, 1, 1, b_time.hour, b_time.minute)
-                b_end = b_start + slot_delta
-                # Overlap condition: (StartA < EndB) and (EndA > StartB)
-                if (req_start < b_end) and (req_end > b_start):
-                    return False, f"Time slot {self.format_canonical_time(req_time)} is already booked or overlaps with an existing appointment ({row_time})."
+
+                raw_date = row[4]
+                if isinstance(raw_date, (datetime, date)):
+                    row_date = raw_date.strftime("%Y-%m-%d")
+                else:
+                    row_date = str(raw_date or "").strip()
+
+                raw_time = row[5]
+                if isinstance(raw_time, time):
+                    row_time = raw_time.strftime("%I:%M %p")
+                else:
+                    row_time = str(raw_time or "").strip()
+
+                status = str(row[9] or "").strip().lower() if len(row) > 9 else "confirmed"
+
+                if row_date == target_date and status != "cancelled":
+                    b_time = self.parse_time_str(row_time)
+                    if not b_time:
+                        continue
+                    b_start = datetime(2000, 1, 1, b_time.hour, b_time.minute)
+                    b_end = b_start + slot_delta
+                    # Overlap condition: (StartA < EndB) and (EndA > StartB)
+                    if (req_start < b_end) and (req_end > b_start):
+                        return False, f"Time slot {self.format_canonical_time(req_time)} is already booked or overlaps with an existing appointment ({row_time})."
 
         return True, "Available"
 
@@ -285,6 +286,53 @@ class SheetService:
             if is_avail:
                 available.append(slot)
         return available
+
+    def get_smart_alternative_slots(self, date_str: str, requested_time: str = "") -> List[str]:
+        """
+        Industry-grade alternative slot finder:
+        Returns the top 1 or 2 closest available slots to the requested time.
+        If requested time is in afternoon break or booked evening, prioritizes closest evening slots.
+        """
+        avail = self.get_available_slots(date_str)
+        if not avail:
+            return []
+
+        req_t = self.parse_time_str(requested_time) if requested_time else None
+        if not req_t:
+            return avail[:2]
+
+        req_minutes = req_t.hour * 60 + req_t.minute
+
+        def proximity(slot_str: str) -> int:
+            t = self.parse_time_str(slot_str)
+            if not t:
+                return 9999
+            slot_minutes = t.hour * 60 + t.minute
+            diff = slot_minutes - req_minutes
+            # Strongly prefer upcoming slots (diff >= 0) over past slots
+            if diff >= 0:
+                return diff
+            return abs(diff) + 300
+
+        sorted_slots = sorted(avail, key=proximity)
+        return sorted_slots[:2]
+
+    def format_alternative_slot_prompt(self, reason: str, alternatives: List[str], lang: str = "ENGLISH") -> str:
+        """Formats polite conflict explanation with actionable real available slots."""
+        if not alternatives:
+            if lang == "HINDI_DEVANAGARI":
+                return f"माफ़ कीजियेगा, {reason}। इस तारीख पर कोई स्लॉट उपलब्ध नहीं है। कृपया कोई अन्य तारीख बताइये।"
+            elif lang == "HINGLISH":
+                return f"Maaf kariyega, {reason}। Is date par koi slot available nahi hai. Kripya koi doosri date bataiye."
+            return f"I apologize, {reason}. No other slots are available on this date. Could you please select another date?"
+
+        slots_text = " ya ".join(alternatives) if lang in ("HINDI_DEVANAGARI", "HINGLISH") else " or ".join(alternatives)
+
+        if lang == "HINDI_DEVANAGARI":
+            return f"माफ़ कीजियेगा, {reason}। इसके बजाय {slots_text} का समय उपलब्ध है। क्या आप इनमें से कोई समय चुनना चाहेंगे?"
+        elif lang == "HINGLISH":
+            return f"Maaf kariyega, {reason}। Iske bajaye shaam ko {slots_text} available hai. Kya aap isme se koi time prefer karenge?"
+        return f"I apologize, {reason}. However, {slots_text} is available today. Would one of those times work for you?"
 
     def _create_backup(self):
         """Creates a timestamped and stable backup copy of the workbook before writing."""

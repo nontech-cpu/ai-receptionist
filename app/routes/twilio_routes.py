@@ -8,6 +8,7 @@ from app.services.llm_service import llm_service
 from app.services.elevenlabs_service import elevenlabs_service
 from app.services.streaming_voice_service import streaming_voice_service
 from app.services.clinic_service import clinic_service
+from app.core.security import verify_admin_key, verify_twilio_signature, mask_sensitive_data
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -122,6 +123,7 @@ async def voice_incoming(request: Request):
     Supports both GET and POST to handle all Twilio webhook configurations.
     """
     data = await extract_request_data(request)
+    await verify_twilio_signature(request, data)
     call_sid = data.get("CallSid", "unknown_call")
     caller_phone = data.get("From", "")
     to_phone = data.get("To", "")
@@ -135,7 +137,8 @@ async def voice_incoming(request: Request):
         patient_phone = caller_phone
 
     base_url = get_base_url(request)
-    print(f"\n[CALL ANSWERED] CallSid={call_sid[-6:]}, PatientPhone={patient_phone}, Method={request.method}")
+    masked_phone = mask_sensitive_data(patient_phone)
+    logger.info(f"\n[CALL ANSWERED] CallSid={call_sid[-6:]}, PatientPhone={masked_phone}, Method={request.method}")
 
     session = session_manager.get_or_create(call_sid, patient_phone)
     greeting = get_initial_greeting()
@@ -173,6 +176,7 @@ async def voice_respond(request: Request):
     Supports both GET and POST to handle any Twilio redirect or probe.
     """
     data = await extract_request_data(request)
+    await verify_twilio_signature(request, data)
     call_sid = data.get("CallSid", "unknown_call")
     user_speech = data.get("SpeechResult", "").strip()
     digits = data.get("Digits", "").strip()
@@ -259,6 +263,7 @@ async def voice_respond(request: Request):
 
 @router.api_route("/api/make-call", methods=["GET", "POST"])
 async def trigger_outbound_call(request: Request, to_number: str = "+918824466229", webhook_url: str = ""):
+    verify_admin_key(request)
     if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
         return {"error": "Twilio credentials not configured."}
 

@@ -6,7 +6,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import openpyxl
 
-from app.core.config import settings
+from app.core.config import settings, BASE_DIR
+from app.core.security import verify_admin_key
 from app.routes.twilio_routes import router as twilio_router, voice_incoming
 from app.services.sheet_service import sheet_service
 from app.services.telegram_service import telegram_service
@@ -20,11 +21,21 @@ app = FastAPI(
     description="Industry-Grade Voice AI Receptionist with Twilio, Gemini, Telegram & Excel"
 )
 
+allowed_origins_raw = getattr(settings, "ALLOWED_ORIGINS", "")
+if allowed_origins_raw:
+    allowed_origins = [o.strip() for o in allowed_origins_raw.split(",") if o.strip()]
+else:
+    allowed_origins = [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "https://web-production-eedb2a06.up.railway.app"
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -49,6 +60,7 @@ def get_clinic_profile():
 @app.post("/api/clinic-profile")
 async def update_clinic_profile(request: Request):
     """Live updates clinic details (Doctor Name, Fees, Timings, Address, etc.) without restarting server."""
+    verify_admin_key(request)
     updates = await request.json()
     updated = clinic_service.update_profile(updates)
     return {
@@ -58,8 +70,9 @@ async def update_clinic_profile(request: Request):
     }
 
 @app.get("/api/appointments")
-def get_appointments():
-    """Returns recent appointments from Excel for dashboard."""
+def get_appointments(request: Request):
+    """Returns recent appointments from Excel for dashboard (secured with ADMIN_API_KEY)."""
+    verify_admin_key(request)
     sheet_service._ensure_file_exists()
     wb = openpyxl.load_workbook(settings.EXCEL_FILE_PATH, data_only=True)
     ws = wb["Appointments"]
@@ -98,35 +111,30 @@ async def simulator_chat(request: Request):
 
 @app.post("/api/set-telegram-chat-id")
 async def set_telegram_chat_id(request: Request):
-    """Sets Telegram chat ID, saves to .env, and sends an instant test notification."""
+    """Sets Telegram chat ID securely (secured with ADMIN_API_KEY)."""
+    verify_admin_key(request)
     data = await request.json()
     chat_id = str(data.get("chat_id", "")).strip()
     if not chat_id:
-        return {"error": "Chat ID cannot be empty"}
+        return JSONResponse(status_code=400, content={"error": "Chat ID cannot be empty"})
 
     telegram_service.chat_id = chat_id
     telegram_service._cached_chat_id = chat_id
-    telegram_service._persist_chat_id(chat_id)
 
     # Send instant verification alert
-    success = telegram_service._sync_send(
+    telegram_service._sync_send(
         "🏥 <b>DR. SHARMA CARE CLINIC - BOT CONNECTED</b>\n\n"
         "Namaste! Your Telegram is now officially linked to the AI Phone Receptionist.\n"
         "All confirmed patient booking reports from Twilio phone calls will be delivered here instantly! 📲✅",
         chat_id=chat_id
     )
 
-    # Also send any recent bookings from appointments.xlsx
-    appointments = get_appointments()
-    if appointments:
-        recent = appointments[0]
-        telegram_service.send_appointment_alert(recent)
-
-    return {"status": "success", "chat_id": chat_id, "message": "Test notification and latest booking report sent!"}
+    return {"status": "success", "chat_id": chat_id, "message": "Telegram connection verified!"}
 
 @app.post("/api/auto-detect-telegram")
-async def auto_detect_telegram():
-    """Auto-detects any new doctor or user who tapped /start on @Frontt_Desk_Bot."""
+async def auto_detect_telegram(request: Request):
+    """Auto-detects any new doctor or user who tapped /start on @Frontt_Desk_Bot (secured with ADMIN_API_KEY)."""
+    verify_admin_key(request)
     new_chat_id = telegram_service.get_latest_chat_id(force_refresh=True)
     if new_chat_id:
         telegram_service._sync_send(
@@ -148,10 +156,15 @@ def get_telegram_status():
 
 @app.get("/api/audio/{filename}")
 def serve_audio(filename: str):
-    audio_dir = Path("data/audio_cache")
-    file_path = audio_dir / filename
-    if file_path.exists():
-        return FileResponse(file_path, media_type="audio/mpeg")
+    """Secure audio file serving with strict path traversal defense."""
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return JSONResponse(status_code=400, content={"error": "Invalid filename"})
+    audio_dir = (BASE_DIR / "data/audio_cache").resolve()
+    target_path = (audio_dir / filename).resolve()
+    if not target_path.is_relative_to(audio_dir):
+        return JSONResponse(status_code=403, content={"error": "Access denied"})
+    if target_path.is_file():
+        return FileResponse(target_path, media_type="audio/mpeg")
     return JSONResponse(status_code=404, content={"error": "Audio file not found"})
 
 @app.get("/architecture-video", response_class=HTMLResponse)
@@ -492,25 +505,39 @@ async def index(request: Request):
             }
         }
 
+        function escapeHtml(str) {
+            if (!str) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
         async function loadAppointments() {
             try {
-                const res = await fetch('/api/appointments');
+                const adminKey = localStorage.getItem('admin_key') || '';
+                const headers = adminKey ? { 'X-Admin-Key': adminKey } : {};
+                const res = await fetch('/api/appointments', { headers });
+                if (res.status === 401) {
+                    const tbody = document.getElementById('apptTableBody');
+                    tbody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-amber-400">Authentication Required: Configure Admin API Key in settings.</td></tr>';
+                    return;
+                }
                 const data = await res.json();
                 const tbody = document.getElementById('apptTableBody');
-                if (data.length === 0) {
+                if (!Array.isArray(data) || data.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-500">No appointments booked yet. Make a call or test in chat!</td></tr>';
                     return;
                 }
                 tbody.innerHTML = data.map(a => `
                     <tr class="hover:bg-slate-700/30 transition">
-                        <td class="p-2.5 font-mono text-blue-400">${a.booking_id}</td>
-                        <td class="p-2.5 font-medium text-white">${a.patient_name}</td>
-                        <td class="p-2.5">${a.phone_number}</td>
-                        <td class="p-2.5 text-emerald-300">${a.date} (${a.time_slot})</td>
-                        <td class="p-2.5 text-slate-400 max-w-[150px] truncate">${a.reason}</td>
+                        <td class="p-2.5 font-mono text-blue-400">${escapeHtml(a.booking_id)}</td>
+                        <td class="p-2.5 font-medium text-white">${escapeHtml(a.patient_name)}</td>
+                        <td class="p-2.5">${escapeHtml(a.phone_number)}</td>
+                        <td class="p-2.5 text-emerald-300">${escapeHtml(a.date)} (${escapeHtml(a.time_slot)})</td>
+                        <td class="p-2.5 text-slate-400 max-w-[150px] truncate">${escapeHtml(a.symptoms || a.reason)}</td>
                         <td class="p-2.5">
                             <span class="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                                ${a.status}
+                                ${escapeHtml(a.status)}
                             </span>
                         </td>
                     </tr>

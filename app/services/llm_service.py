@@ -4,18 +4,20 @@ import re
 import time
 import requests
 from datetime import datetime, timedelta
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Tuple, Dict, Any
+
 from app.core.config import settings
 from app.core.prompt import get_receptionist_prompt
 from app.services.sheet_service import sheet_service
 from app.services.telegram_service import telegram_service
 from app.services.session_manager import session_manager
+from app.services.state_machine import state_machine, SessionState, MANDATORY_SLOTS
 from app.services.clinic_service import clinic_service
-from app.utils.phonetics import parse_spoken_hindi_numbers, format_digits_for_readback
+from app.utils.phonetics import parse_spoken_hindi_numbers
 
 logger = logging.getLogger(__name__)
 
-# Reusable HTTP Session with Connection: close to eliminate zombie socket delays
+# Reusable HTTP Session with Connection: close
 http_session = requests.Session()
 http_session.headers.update({"Connection": "close"})
 
@@ -50,36 +52,35 @@ TOOLS_DEFINITION = [
         "function_declarations": [
             {
                 "name": "book_appointment",
-                "description": "Confirm and record patient appointment into the clinic database. ONLY call when patient full name, symptoms, date & time slot within working hours, and 10-digit mobile number have all been verbally provided by caller.",
+                "description": "Extract patient appointment details verbally stated by caller. Only fill parameters that were explicitly provided by the caller.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "patient_name": {
                             "type": "STRING",
-                            "description": "Actual human full name of the patient (e.g. Sunil, Devendra, Anita, Neeraj). Never food, drink, brand, or illness words like 'Nescafe' or 'Coffee'."
+                            "description": "Actual full name of the patient explicitly provided by caller."
                         },
                         "phone_number": {
                             "type": "STRING",
-                            "description": "10-digit contact mobile number verbally provided by the caller. REQUIRED before booking."
+                            "description": "10-digit contact mobile number explicitly provided by caller."
                         },
                         "date": {
                             "type": "STRING",
-                            "description": "Appointment date in YYYY-MM-DD format (e.g. 2026-11-24). ONLY fill if explicitly chosen or agreed by caller. Do not guess."
+                            "description": "Appointment date in YYYY-MM-DD format explicitly chosen by caller."
                         },
                         "time_slot": {
                             "type": "STRING",
-                            "description": "Selected time slot within clinic sessions: 11:00 AM - 02:00 PM or 06:00 PM - 08:00 PM (e.g. 11:00 AM, 11:15 AM, 06:00 PM, 06:30 PM, 07:30 PM). ONLY fill if explicitly chosen or agreed by caller. Do not guess."
+                            "description": "Appointment time slot explicitly chosen by caller (e.g. 11:00 AM, 06:30 PM)."
                         },
                         "symptoms": {
                             "type": "STRING",
-                            "description": "Specific health symptoms or complaint (e.g. loose motion, fever, cough, stomach pain, checkup)"
+                            "description": "Health symptoms or reason for visit stated by caller."
                         },
                         "duration": {
                             "type": "STRING",
-                            "description": "Duration of symptoms e.g. '10 days', '2 days', 'since yesterday'"
+                            "description": "Duration of symptoms stated by caller."
                         }
-                    },
-                    "required": ["patient_name", "date", "time_slot", "phone_number", "symptoms"]
+                    }
                 }
             }
         ]
@@ -102,8 +103,7 @@ def is_devanagari_text(text: str) -> bool:
 
 def detect_caller_language(text: str, current_lang: str = "ENGLISH") -> str:
     """
-    Industry-standard language detection with persistent session memory.
-    Short slot replies (numbers, times, symptoms, names) inherit current session language.
+    Industry-standard language detection with persistent sticky session memory.
     Only shifts language when clear intent/markers in the target language are detected.
     """
     if not text:
@@ -142,11 +142,10 @@ def detect_caller_language(text: str, current_lang: str = "ENGLISH") -> str:
         e_count = sum(1 for w in words if w in english_markers)
         return "HINGLISH" if h_count > e_count else "ENGLISH"
 
-    # Ambiguous, digits, times, names, or short answers inherit active conversation language!
     return current_lang
 
 def get_live_schedule_summary() -> str:
-    """Generates real-time 3-day continuous schedule summary for prompt injection."""
+    """Generates continuous schedule summary for prompt injection."""
     today = datetime.now()
     schedule_lines = []
     for i in range(3):
@@ -178,8 +177,7 @@ class LLMService:
 
     def _call_gemini_api(self, contents: list, system_prompt: str, include_tools: bool = True) -> dict:
         """
-        Synchronous REST API call to Gemini Flash-Lite governed by a strict 3.2-second budget.
-        Retains up to the last 10 messages of conversation history to preserve full call context.
+        Synchronous REST API call to Gemini Flash-Lite with 3.2-second budget.
         """
         recent_messages = contents[-10:] if len(contents) > 10 else contents
         payload = {
@@ -208,204 +206,290 @@ class LLMService:
                 res = http_session.post(url, json=payload, timeout=timeout_sec)
                 if res.status_code == 200:
                     return res.json()
-                logger.warning(f"[LLM] Model {model} returned HTTP {res.status_code}, checking remaining budget...")
+                logger.warning(f"[LLM] Model {model} returned HTTP {res.status_code}")
             except Exception as e:
-                logger.warning(f"[LLM] Model {model} error or timeout ({timeout_sec:.2f}s budget): {e}")
+                logger.warning(f"[LLM] Model {model} error or timeout: {e}")
                 continue
 
         raise TimeoutError("Gemini LLM exceeded strict 3.2s latency budget.")
 
-    def process_turn(self, call_sid: str, user_speech: str) -> tuple[str, bool]:
+    def process_turn(self, call_sid: str, user_speech: str) -> Tuple[str, bool]:
         """
-        Industry-standard Voice AI turn processor.
-        Empowers Gemini LLM with complete semantic understanding and autonomous tool execution.
-        Preserves multi-turn sticky session language and enforces real patient data collection.
+        Deterministic, state-machine governed Voice AI turn processor.
+        - Gemini performs semantic slot extraction & conversational answering only.
+        - Deterministic state machine gates validation, explicit read-back confirmation, and booking.
         """
         session = session_manager.get_or_create(call_sid)
         user_lower = user_speech.lower().strip()
 
-        # Sticky multi-turn session language memory
+        # 1. Update Sticky Session Language
         current_lang = getattr(session, "language", "ENGLISH")
         session.language = detect_caller_language(user_speech, current_lang)
         caller_lang = session.language
 
-        # Parse spoken 10-digit mobile number if caller speaks one (never store Twilio trunk)
+        # 2. Extract Spoken Phone Digits
         spoken_phone = parse_spoken_hindi_numbers(user_speech)
         if spoken_phone and not spoken_phone.endswith("7372212163"):
-            session.slots["phone_number"] = spoken_phone
+            state_machine.update_session_slots(session, {"phone_number": spoken_phone})
             session.caller_phone = spoken_phone
-            logger.info(f"[CALL {call_sid[-6:]}] Extracted Spoken 10-digit Phone: {spoken_phone}")
 
-        # Check if caller wants to gracefully end call after booking is completed
-        if session.is_completed:
-            closing_cues = ["nahi", "no", "bas", "bus", "thank", "dhanyawad", "shukriya", "bye", "goodbye", "done", "all set", "that's all", "nothing"]
-            has_question = any(q in user_lower for q in ["kya", "kitna", "kitne", "kab", "kahan", "kaha", "fee", "fees", "address", "timing", "cost", "pata", "doctor", "where", "how much"])
-            is_closing = any(c in user_lower for c in closing_cues) and not has_question
-            if is_closing:
+        # 3. Post-Booking Call Wrap-Up
+        if session.is_completed or session.state == SessionState.BOOKING_COMPLETED:
+            if state_machine.is_wrapup(user_lower):
+                session.state = SessionState.CALL_WRAPUP
                 if caller_lang == "ENGLISH":
-                    closing_reply = "Thank you very much! Please arrive at the clinic 10 minutes prior to your slot. Take care and goodbye!"
+                    farewell = "Thank you very much for calling Dr. Sharma Care Clinic. Please arrive 10 minutes prior to your slot. Take care and goodbye!"
                 elif caller_lang == "HINDI_DEVANAGARI":
-                    closing_reply = "आपका बहुत-बहुत धन्यवाद! क्लिनिक पर समय से 10 मिनट पहले पधारें। अपना ख्याल रखियेगा, नमस्ते!"
+                    farewell = "डॉक्टर शर्मा क्लिनिक में कॉल करने के लिए बहुत धन्यवाद। समय से 10 मिनट पहले पधारें। अपना ख्याल रखियेगा, नमस्ते!"
                 else:
-                    closing_reply = "Aapka bahut-bahut shukriya! Clinic par samay se 10 minute pehle pahunchein. Apna khayal rakhiye, namaste!"
-                session_manager.add_model_message(call_sid, closing_reply)
-                logger.info(f"[CALL {call_sid[-6:]}] Call Completed Gracefully: {closing_reply}")
-                return closing_reply, True
+                    farewell = "Dr. Sharma clinic mein call karne ke liye shukriya. Samay se 10 minute pehle pahunchein. Apna khayal rakhiye, namaste!"
+                session_manager.add_model_message(call_sid, farewell)
+                return farewell, True
 
         session_manager.add_user_message(call_sid, user_speech)
-        logger.info(f"\n[CALL {call_sid[-6:]}] User Said ({caller_lang}): '{user_speech}'")
+        logger.info(f"\n[CALL {call_sid[-6:]}] User Said ({caller_lang}, State={session.state}): '{user_speech}'")
 
+        # 4. Handle Active Awaiting Explicit Confirmation State
+        if session.state == SessionState.AWAITING_EXPLICIT_CONFIRMATION:
+            is_aff = state_machine.is_affirmative(user_speech)
+            is_rej = state_machine.is_rejection(user_speech)
+
+            # Check if caller is speaking a correction
+            # Call LLM to see if any new slot values are being corrected
+            extracted_slots, direct_text = self._extract_slots_from_llm(session, user_speech, caller_lang)
+            changed_slots = state_machine.update_session_slots(session, extracted_slots) if extracted_slots else []
+
+            if changed_slots:
+                # Caller corrected a field! Invalidation already triggered in update_session_slots
+                logger.info(f"[CALL {call_sid[-6:]}] Caller corrected slot(s): {changed_slots}")
+                # Revalidate new slot
+                valid, reason = sheet_service.validate_slot(
+                    session.slots["appointment_date"],
+                    session.slots["appointment_time"]
+                )
+                if not valid:
+                    session.set_slot("appointment_time", None)
+                    session.state = SessionState.COLLECTING_DETAILS
+                    msg = f"I apologize, {reason}. What other time slot would you prefer?" if caller_lang == "ENGLISH" else f"Maaf kariyega, {reason}. Aap doosra kaunsa time prefer karenge?"
+                    session_manager.add_model_message(call_sid, msg)
+                    return msg, False
+
+                # Valid correction -> Generate fresh readback!
+                session.state = SessionState.AWAITING_EXPLICIT_CONFIRMATION
+                session.explicit_confirmation_requested = True
+                readback = state_machine.format_readback_prompt(session, caller_lang)
+                session_manager.add_model_message(call_sid, readback)
+                return readback, False
+
+            elif is_rej:
+                # Caller rejected the readback
+                session.explicit_confirmation_requested = False
+                session.state = SessionState.COLLECTING_DETAILS
+                if caller_lang == "ENGLISH":
+                    rej_msg = "No problem! Which detail would you like to change — the date, time, or patient name?"
+                elif caller_lang == "HINDI_DEVANAGARI":
+                    rej_msg = "कोई बात नहीं! आप कौन सी जानकारी बदलना चाहेंगे — तारीख, समय, या मरीज़ का नाम?"
+                else:
+                    rej_msg = "Koi baat nahi! Aap kaunsi detail badalna chahenge — date, time, ya patient ka naam?"
+                session_manager.add_model_message(call_sid, rej_msg)
+                return rej_msg, False
+
+            elif is_aff:
+                # Explicit affirmative confirmation received!
+                # Revalidate availability under lock right before execution
+                date_val = session.slots["appointment_date"]
+                time_val = session.slots["appointment_time"]
+                valid, reason = sheet_service.validate_slot(date_val, time_val)
+                if not valid:
+                    # Slot was taken while awaiting confirmation
+                    session.explicit_confirmation_requested = False
+                    session.set_slot("appointment_time", None)
+                    session.state = SessionState.COLLECTING_DETAILS
+                    if caller_lang == "ENGLISH":
+                        conflict_msg = f"I apologize, but {reason}. Would you like to pick another time slot?"
+                    elif caller_lang == "HINDI_DEVANAGARI":
+                        conflict_msg = f"माफ़ कीजियेगा, {reason}। क्या आप कोई अन्य समय चुनना चाहेंगे?"
+                    else:
+                        conflict_msg = f"Maaf kariyega, {reason}। Kya aap koi doosra time slot select karna chahenge?"
+                    session_manager.add_model_message(call_sid, conflict_msg)
+                    return conflict_msg, False
+
+                # Single Deterministic Booking Path:
+                booking = sheet_service.save_appointment(
+                    patient_name=session.slots["patient_name"],
+                    phone_number=session.slots["phone_number"],
+                    date_str=date_val,
+                    time_slot=time_val,
+                    symptoms=session.slots["symptoms"],
+                    duration=session.slots.get("duration", "Recently started"),
+                    call_sid=call_sid
+                )
+
+                if booking.get("status") == "Failed":
+                    # Error writing
+                    err_msg = booking.get("error", "Unable to save appointment.")
+                    session.state = SessionState.COLLECTING_DETAILS
+                    return err_msg, False
+
+                try:
+                    telegram_service.send_appointment_alert(booking)
+                except Exception as e:
+                    logger.error(f"[TELEGRAM] Notification delivery failed: {e}")
+
+                session_manager.mark_completed(call_sid, booking)
+
+                confirm_reply = state_machine.format_confirmation_success(session, booking, caller_lang)
+                cleaned = clean_for_speech(confirm_reply)
+                session_manager.add_model_message(call_sid, cleaned)
+                return cleaned, False
+
+            else:
+                # Unclear reply while awaiting confirmation
+                prompt_again = state_machine.format_readback_prompt(session, caller_lang)
+                session_manager.add_model_message(call_sid, prompt_again)
+                return prompt_again, False
+
+        # 5. Extract Candidate Slots via LLM
+        extracted_slots, direct_text = self._extract_slots_from_llm(session, user_speech, caller_lang)
+        if extracted_slots:
+            state_machine.update_session_slots(session, extracted_slots)
+
+        # 6. Check Premature Affirmative ("yes" while slots are still missing)
+        if state_machine.is_affirmative(user_speech) and not state_machine.is_all_slots_collected(session):
+            logger.info(f"[CALL {call_sid[-6:]}] Premature 'yes' ignored. Missing mandatory slots remain.")
+
+        # 7. Check if All 5 Mandatory Slots are Collected
+        if state_machine.is_all_slots_collected(session):
+            session.state = SessionState.VALIDATING
+            date_val = session.slots["appointment_date"]
+            time_val = session.slots["appointment_time"]
+
+            # Validate against clinic rules and existing bookings
+            valid, reason = sheet_service.validate_slot(date_val, time_val)
+            if not valid:
+                logger.warning(f"[CALL {call_sid[-6:]}] Slot validation failed: {reason}")
+                session.set_slot("appointment_time", None)
+                session.state = SessionState.COLLECTING_DETAILS
+                if caller_lang == "ENGLISH":
+                    conflict_reply = f"I apologize, {reason}. Could you please choose another available time or date?"
+                elif caller_lang == "HINDI_DEVANAGARI":
+                    conflict_reply = f"माफ़ कीजियेगा, {reason}। कृपया कोई अन्य समय या तारीख बताइये।"
+                else:
+                    conflict_reply = f"Maaf kariyega, {reason}। Kripya koi doosra samay ya tarikh bata dijiye."
+                cleaned = clean_for_speech(conflict_reply)
+                session_manager.add_model_message(call_sid, cleaned)
+                return cleaned, False
+
+            # Valid -> Enter Awaiting Explicit Confirmation!
+            session.state = SessionState.AWAITING_EXPLICIT_CONFIRMATION
+            session.explicit_confirmation_requested = True
+            readback = state_machine.format_readback_prompt(session, caller_lang)
+            cleaned = clean_for_speech(readback)
+            session_manager.add_model_message(call_sid, cleaned)
+            logger.info(f"[CALL {call_sid[-6:]}] Read-back generated: '{cleaned}'")
+            return cleaned, False
+
+        # 8. Still Missing Slots -> Ask Caller Naturally
+        session.state = SessionState.COLLECTING_DETAILS
+        missing = state_machine.get_missing_slots(session)
+        logger.info(f"[CALL {call_sid[-6:]}] Still missing slots: {missing}")
+
+        # If LLM answered a FAQ question (e.g. fees, address), use LLM response and prompt for next missing slot
+        if direct_text and len(direct_text.strip()) > 3:
+            spoken_text = direct_text
+        else:
+            # Deterministic missing slot prompts
+            next_missing = missing[0]
+            spoken_text = self._get_missing_slot_prompt(next_missing, caller_lang)
+
+        cleaned = clean_for_speech(spoken_text)
+        session_manager.add_model_message(call_sid, cleaned)
+        return cleaned, False
+
+    def _extract_slots_from_llm(self, session, user_speech: str, caller_lang: str) -> Tuple[Dict[str, Any], str]:
+        """
+        Calls Gemini to extract candidate slots and natural conversational text.
+        Never executes booking.
+        """
         today_str = datetime.now().strftime("%Y-%m-%d")
         schedule_summary = get_live_schedule_summary()
 
-        # Build persistent known slots summary from conversation memory
         known_items = []
-        if session.slots.get("patient_name"):
-            known_items.append(f"- Patient Name: {session.slots['patient_name']}")
-        if session.slots.get("symptoms"):
-            known_items.append(f"- Symptoms / Reason: {session.slots['symptoms']}")
-        if session.slots.get("date") or session.slots.get("time_slot"):
-            known_items.append(f"- Preferred Slot: {session.slots.get('date', '')} {session.slots.get('time_slot', '')}".strip())
-        if session.slots.get("phone_number"):
-            known_items.append(f"- Contact Phone: {session.slots['phone_number']}")
+        for k in MANDATORY_SLOTS:
+            val = session.slots.get(k)
+            if val:
+                known_items.append(f"- {k.replace('_', ' ').title()}: {val}")
         known_slots_summary = "\n".join(known_items)
 
-        lang_directive = f"\nCRITICAL DIRECTIVE: The caller is speaking in {caller_lang}. You MUST reply STRICTLY in {caller_lang}! If ENGLISH, reply 100% in polished English without any Hindi words. If HINGLISH, reply in conversational Roman Hinglish."
+        lang_directive = f"\nCRITICAL DIRECTIVE: The caller is speaking in {caller_lang}. You MUST reply STRICTLY in {caller_lang}! If ENGLISH, reply 100% in polished English. If HINGLISH, reply in Roman Hinglish."
         system_prompt = get_receptionist_prompt(today_str, schedule_summary, known_slots_summary=known_slots_summary) + lang_directive
 
-        include_tools = not session.is_completed
-
         try:
-            api_resp = self._call_gemini_api(session.messages, system_prompt, include_tools=include_tools)
+            api_resp = self._call_gemini_api(session.messages, system_prompt, include_tools=True)
             candidate = api_resp.get("candidates", [{}])[0]
             parts = candidate.get("content", {}).get("parts", [])
 
-            func_call = None
+            extracted_slots = {}
             direct_text = ""
 
             for p in parts:
-                if "functionCall" in p and include_tools:
-                    func_call = p["functionCall"]
+                if "functionCall" in p:
+                    args = p["functionCall"].get("args", {})
+                    if "patient_name" in args:
+                        extracted_slots["patient_name"] = args["patient_name"]
+                    if "phone_number" in args:
+                        extracted_slots["phone_number"] = args["phone_number"]
+                    if "date" in args:
+                        extracted_slots["appointment_date"] = args["date"]
+                    if "time_slot" in args:
+                        extracted_slots["appointment_time"] = args["time_slot"]
+                    if "symptoms" in args:
+                        extracted_slots["symptoms"] = args["symptoms"]
+                    if "duration" in args:
+                        extracted_slots["duration"] = args["duration"]
                 elif "text" in p:
                     direct_text = p["text"]
 
-            if func_call:
-                args = func_call.get("args", {})
-                
-                # Extract and preserve patient name without any hardcoded blacklist
-                raw_name = args.get("patient_name", "").strip().title()
-                if raw_name and raw_name not in ("Patient", "None"):
-                    patient_name = raw_name
-                else:
-                    patient_name = session.slots.get("patient_name") or "Patient"
-                session.slots["patient_name"] = patient_name
-
-                # Extract and preserve symptoms across all turns
-                raw_symptoms = args.get("symptoms", "").strip()
-                if raw_symptoms and raw_symptoms not in ("General Consultation", "None"):
-                    symptoms = raw_symptoms
-                else:
-                    symptoms = session.slots.get("symptoms") or "General Consultation"
-                session.slots["symptoms"] = symptoms
-
-                # Extract and preserve date and time slot
-                date_val = args.get("date") or session.slots.get("date") or today_str
-                slot = args.get("time_slot") or session.slots.get("time_slot") or "11:00 AM"
-                session.slots["date"] = date_val
-                session.slots["time_slot"] = slot
-                duration = args.get("duration", "Recently noticed")
-
-                # Clean contact number & strictly guard against Twilio trunk bot numbers
-                raw_phone = str(args.get("phone_number") or "")
-                clean_digits = "".join(ch for ch in raw_phone if ch.isdigit())
-                if (len(clean_digits) < 10 or clean_digits.endswith("7372212163")) and session.slots.get("phone_number"):
-                    clean_digits = session.slots["phone_number"]
-                if clean_digits.endswith("7372212163"):
-                    clean_digits = ""
-
-                # If 10-digit phone number is missing, prompt caller verbally
-                if len(clean_digits) < 10:
-                    logger.warning(f"[CALL {call_sid[-6:]}] Booking requested but 10-digit phone missing. Asking caller.")
-                    if caller_lang == "ENGLISH":
-                        ask_phone = "Could you please share your 10-digit contact mobile number to confirm the booking?"
-                    elif caller_lang == "HINDI_DEVANAGARI":
-                        ask_phone = "अपॉइंटमेंट पक्का करने के लिए कृपया अपना 10 अंकों का मोबाइल नंबर बताइये।"
-                    else:
-                        ask_phone = "Appointment confirm karne ke liye kripya apna 10-digit mobile number bata dijiye."
-                    session_manager.add_model_message(call_sid, ask_phone)
-                    return ask_phone, False
-
-                session.slots["phone_number"] = clean_digits
-                readback = " ".join(clean_digits)
-
-                booking = sheet_service.save_appointment(
-                    patient_name=patient_name,
-                    phone_number=clean_digits,
-                    date_str=date_val,
-                    time_slot=slot,
-                    symptoms=symptoms,
-                    duration=duration
-                )
-
-                telegram_service.send_appointment_alert(booking)
-                session_manager.mark_completed(call_sid, booking)
-
-                try:
-                    dt = datetime.strptime(date_val, "%Y-%m-%d")
-                    friendly_date = dt.strftime("%A, %B %d")
-                except Exception:
-                    friendly_date = date_val
-
-                clean_slot = slot.replace(":00", "")
-
-                # Format spoken confirmation strictly in active conversation language
-                if caller_lang == "ENGLISH":
-                    doc = clinic_service.profile.doctor_name
-                    spoken_text = (
-                        f"Certainly! The appointment for {patient_name} with {doc} is confirmed for "
-                        f"{friendly_date} at {slot}. Registered contact number is {readback}. "
-                        "Would you like to know the clinic address or consultation fees?"
-                    )
-                elif caller_lang == "HINDI_DEVANAGARI":
-                    spoken_text = (
-                        f"बिल्कुल! {patient_name} जी का अपॉइंटमेंट {friendly_date} को "
-                        f"{clean_slot} बजे पक्का हो गया है। आपका फ़ोन नंबर {readback} नोट कर लिया गया है। "
-                        "क्या क्लिनिक का पता या फीस जाननी है?"
-                    )
-                else:
-                    spoken_text = (
-                        f"Bilkul! {patient_name} ji ka appointment {friendly_date} ko "
-                        f"{clean_slot} baje confirm ho gaya hai. Phone number {readback} note kar liya hai. "
-                        "Kya clinic ka address ya fees ke baare mein kuch poochna hai?"
-                    )
-
-                logger.info(f"[CALL {call_sid[-6:]}] Confirmed Booking: {booking['booking_id']} for {patient_name}")
-                is_done = False
-
-            else:
-                default_opener = "Certainly! How may I assist you today?" if caller_lang == "ENGLISH" else "Ji bilkul, bataiye main aapki kya madad kar sakti hoon?"
-                spoken_text = direct_text if direct_text and len(direct_text.strip()) > 3 else default_opener
-                is_done = False
-
-            cleaned = clean_for_speech(spoken_text)
-            session_manager.add_model_message(call_sid, cleaned)
-            logger.info(f"[CALL {call_sid[-6:]}] AI Replied ({caller_lang}): '{cleaned}'")
-            return cleaned, is_done
+            return extracted_slots, direct_text
 
         except Exception as e:
-            logger.warning(f"[CALL {call_sid[-6:]}] LLM budget or error ({e}). Returning natural dynamic listening cue.")
-            cues = FALLBACK_LISTENING_CUES.get(caller_lang, FALLBACK_LISTENING_CUES["ENGLISH"])
-            idx = getattr(session, "fallback_idx", 0)
-            fallback = cues[idx % len(cues)]
-            session.fallback_idx = idx + 1
-            session_manager.add_model_message(call_sid, fallback)
-            return fallback, False
+            logger.warning(f"[LLM] Error calling Gemini: {e}")
+            return {}, ""
 
-    async def stream_turn(self, call_sid: str, user_speech: str) -> AsyncGenerator[tuple[str, bool], None]:
-        """
-        Streaming wrapper for real-time WebSockets / SSE.
-        Yields sentence chunks so caller hears audio immediately.
-        """
+    def _get_missing_slot_prompt(self, missing_slot: str, lang: str) -> str:
+        """Deterministic prompts for missing mandatory booking fields."""
+        prompts = {
+            "patient_name": {
+                "ENGLISH": "Could you please tell me the patient's full name?",
+                "HINGLISH": "Kripya patient ka poora naam bata dijiye?",
+                "HINDI_DEVANAGARI": "कृपया मरीज़ का पूरा नाम बताइये?"
+            },
+            "symptoms": {
+                "ENGLISH": "Could you please share the health symptoms or reason for the visit?",
+                "HINGLISH": "Kripya takleef ya bimari ke lakshan bata dijiye?",
+                "HINDI_DEVANAGARI": "कृपया अपनी तकलीफ़ या लक्षण बताइये?"
+            },
+            "appointment_date": {
+                "ENGLISH": "Which date would you prefer for the appointment?",
+                "HINGLISH": "Aap kis date ko appointment lena chahenge?",
+                "HINDI_DEVANAGARI": "आप किस तारीख को अपॉइंटमेंट लेना चाहेंगे?"
+            },
+            "appointment_time": {
+                "ENGLISH": "What time slot would you prefer within our clinic hours?",
+                "HINGLISH": "Aap subah 11 se 2 ya shaam 6 se 8 ke beech kaunsa time prefer karenge?",
+                "HINDI_DEVANAGARI": "आप सुबह 11 से 2 या शाम 6 से 8 के बीच कौनसा समय पसंद करेंगे?"
+            },
+            "phone_number": {
+                "ENGLISH": "Could you please share your 10-digit contact mobile number so I can confirm the booking?",
+                "HINGLISH": "Appointment confirm karne ke liye kripya apna 10-digit mobile number bata dijiye.",
+                "HINDI_DEVANAGARI": "अपॉइंटमेंट पक्का करने के लिए कृपया अपना 10 अंकों का मोबाइल नंबर बताइये।"
+            }
+        }
+        slot_dict = prompts.get(missing_slot, prompts["phone_number"])
+        return slot_dict.get(lang, slot_dict["ENGLISH"])
+
+    async def stream_turn(self, call_sid: str, user_speech: str) -> AsyncGenerator[Tuple[str, bool], None]:
+        """Streaming wrapper for WebSockets / SSE."""
         reply_text, is_done = self.process_turn(call_sid, user_speech)
         sentences, _ = split_sentences(reply_text)
         if not sentences:
@@ -414,7 +498,6 @@ class LLMService:
         for idx, sentence in enumerate(sentences):
             cleaned = clean_for_speech(sentence)
             if cleaned:
-                # Last chunk conveys is_done state
                 last_chunk = (idx == len(sentences) - 1)
                 yield cleaned, (is_done if last_chunk else False)
 

@@ -9,6 +9,13 @@ load_dotenv(BASE_DIR / ".env")
 class Settings:
     PROJECT_NAME: str = "AI Clinic Receptionist"
     VERSION: str = "1.0.0"
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+
+    # Security & Administration
+    ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
+    ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", "")
+    WEBHOOK_BASE_URL: str = os.getenv("WEBHOOK_BASE_URL", "")
+    TWILIO_VALIDATE_SIGNATURE: bool = os.getenv("TWILIO_VALIDATE_SIGNATURE", "false").lower() in ("true", "1", "yes")
 
     # Twilio
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
@@ -21,7 +28,7 @@ class Settings:
 
     # Gemini
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
 
     # Clinic
     CLINIC_NAME: str = os.getenv("CLINIC_NAME", "Dr. Sharma's Care Clinic")

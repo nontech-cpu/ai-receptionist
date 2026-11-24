@@ -1,18 +1,24 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
+from app.services.state_machine import SessionState, MANDATORY_SLOTS
 
 @dataclass
 class CallSession:
     call_sid: str
     caller_phone: str
-    slots: dict = field(default_factory=lambda: {
+    state: SessionState = SessionState.GREETING
+    explicit_confirmation_requested: bool = False
+    slots: Dict[str, Optional[str]] = field(default_factory=lambda: {
         "patient_name": None,
         "symptoms": None,
-        "duration": None,
-        "time_slot": None,
+        "appointment_date": None,
+        "appointment_time": None,
+        "phone_number": None,
+        "duration": "Recently noticed",
+        # Aliases for backward compatibility
         "date": None,
-        "phone_number": None
+        "time_slot": None
     })
     messages: List[dict] = field(default_factory=list)
     is_completed: bool = False
@@ -21,6 +27,18 @@ class CallSession:
     language: str = "ENGLISH"  # Persists caller conversation language (sticky session memory)
     created_at: datetime = field(default_factory=datetime.now)
     last_active: datetime = field(default_factory=datetime.now)
+
+    def set_slot(self, key: str, value: Optional[str]):
+        """Sets a slot and maintains backward-compatible aliases."""
+        self.slots[key] = value
+        if key == "appointment_date":
+            self.slots["date"] = value
+        elif key == "date":
+            self.slots["appointment_date"] = value
+        elif key == "appointment_time":
+            self.slots["time_slot"] = value
+        elif key == "time_slot":
+            self.slots["appointment_time"] = value
 
 class SessionManager:
     def __init__(self):
@@ -36,7 +54,8 @@ class SessionManager:
                 digits = "".join(c for c in caller_phone if c.isdigit())
                 # Never assign Twilio bot trunk number to patient phone slot
                 if len(digits) >= 10 and not digits.endswith("7372212163"):
-                    session.slots["phone_number"] = digits[-10:]
+                    clean_phone = digits[-10:]
+                    session.set_slot("phone_number", clean_phone)
             self._sessions[call_sid] = session
         else:
             session = self._sessions[call_sid]
@@ -45,7 +64,8 @@ class SessionManager:
                 session.caller_phone = caller_phone
                 digits = "".join(c for c in caller_phone if c.isdigit())
                 if len(digits) >= 10 and not digits.endswith("7372212163") and not session.slots.get("phone_number"):
-                    session.slots["phone_number"] = digits[-10:]
+                    clean_phone = digits[-10:]
+                    session.set_slot("phone_number", clean_phone)
         return self._sessions[call_sid]
 
     def add_user_message(self, call_sid: str, text: str):
@@ -68,6 +88,7 @@ class SessionManager:
     def mark_completed(self, call_sid: str, appointment_data: dict = None):
         session = self.get_or_create(call_sid)
         session.is_completed = True
+        session.state = SessionState.BOOKING_COMPLETED
         if appointment_data:
             session.appointment_data = appointment_data
 

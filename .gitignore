@@ -17,6 +17,10 @@ venv/
 data/audio_cache/*
 !data/audio_cache/.gitkeep
 data/appointments.xlsx
+data/*.lock
+data/*.tmp
+data/*_backup.xlsx
+.pytest_cache/
 
 # Editor & System
 .vscode/

@@ -13,6 +13,7 @@ from app.services.telegram_service import telegram_service
 from app.services.session_manager import session_manager
 from app.services.state_machine import state_machine, SessionState, MANDATORY_SLOTS
 from app.services.clinic_service import clinic_service
+from app.services.speech_normalizer import speech_normalizer
 from app.utils.phonetics import parse_spoken_hindi_numbers
 
 logger = logging.getLogger(__name__)
@@ -213,27 +214,139 @@ class LLMService:
 
         raise TimeoutError("Gemini LLM exceeded strict 3.2s latency budget.")
 
-    def process_turn(self, call_sid: str, user_speech: str) -> Tuple[str, bool]:
+    def process_turn(self, call_sid: str, user_speech: str, confidence: Optional[float] = None) -> Tuple[str, bool]:
         """
         Deterministic, state-machine governed Voice AI turn processor.
-        - Gemini performs semantic slot extraction & conversational answering only.
-        - Deterministic state machine gates validation, explicit read-back confirmation, and booking.
+        - Preserves raw transcripts for audit and confidence verification.
+        - Checks for clinical emergency red flags before standard booking.
+        - Handles phonetic ambiguities via explicit caller clarification without silent rewrites.
+        - Gates validation, explicit read-back confirmation, and Excel booking.
         """
         session = session_manager.get_or_create(call_sid)
         user_lower = user_speech.lower().strip()
+
+        # Audit log of raw transcript with timestamp & confidence
+        session.raw_transcripts.append({
+            "turn": len(session.raw_transcripts) + 1,
+            "raw": user_speech,
+            "confidence": confidence,
+            "timestamp": datetime.now().isoformat()
+        })
+        session_manager.add_user_message(call_sid, user_speech)
 
         # 1. Update Sticky Session Language
         current_lang = getattr(session, "language", "ENGLISH")
         session.language = detect_caller_language(user_speech, current_lang)
         caller_lang = session.language
 
-        # 2. Extract Spoken Phone Digits
+        # 2. Patient Safety: Immediate Emergency Red-Flag Check (Requirement 8)
+        is_emerg, emerg_msg = speech_normalizer.check_emergency_symptom(user_speech, caller_lang)
+        if is_emerg:
+            cleaned = clean_for_speech(emerg_msg)
+            session_manager.add_model_message(call_sid, cleaned)
+            return cleaned, False
+
+        # 3. Handle Active Clarification State (Requirement 3: Never silently rewrite)
+        if session.state == SessionState.AWAITING_CLARIFICATION and session.pending_clarification:
+            pending = session.pending_clarification
+            is_aff = state_machine.is_affirmative(user_speech)
+            is_rej = state_machine.is_rejection(user_speech)
+
+            if is_aff:
+                # Caller confirmed the interpreted candidate!
+                target_slot = pending.get("target_slot")
+                suggested_val = pending.get("suggested_value")
+                session.slots[target_slot] = suggested_val
+                session.slot_sources[target_slot] = {
+                    "raw_phrase": pending.get("raw_phrase"),
+                    "suggested": suggested_val,
+                    "confirmed": True,
+                    "source": "acoustic_clarification_confirmed"
+                }
+                logger.info(f"[CLARIFICATION] Caller confirmed {target_slot} -> '{suggested_val}' (from '{pending.get('raw_phrase')}')")
+                session.pending_clarification = None
+
+                # Check if all mandatory slots are now collected
+                if state_machine.is_all_slots_collected(session):
+                    session.state = SessionState.VALIDATING
+                    date_val = session.slots["appointment_date"]
+                    time_val = session.slots["appointment_time"]
+                    valid, reason = sheet_service.validate_slot(date_val, time_val)
+                    if valid:
+                        session.state = SessionState.AWAITING_EXPLICIT_CONFIRMATION
+                        session.explicit_confirmation_requested = True
+                        readback = state_machine.format_readback_prompt(session, caller_lang)
+                        cleaned = clean_for_speech(readback)
+                        session_manager.add_model_message(call_sid, cleaned)
+                        return cleaned, False
+
+                session.state = SessionState.COLLECTING_DETAILS
+                missing = state_machine.get_missing_slots(session)
+                next_missing = missing[0]
+                if caller_lang == "ENGLISH":
+                    ack = f"Got it, noted {suggested_val}. " + self._get_missing_slot_prompt(next_missing, caller_lang)
+                elif caller_lang == "HINDI_DEVANAGARI":
+                    ack = f"जी धन्यवाद, {suggested_val} नोट कर लिया है। " + self._get_missing_slot_prompt(next_missing, caller_lang)
+                else:
+                    ack = f"Theek hai, {suggested_val} note kar liya hai. " + self._get_missing_slot_prompt(next_missing, caller_lang)
+                cleaned = clean_for_speech(ack)
+                session_manager.add_model_message(call_sid, cleaned)
+                return cleaned, False
+
+            elif is_rej:
+                # Caller rejected the interpretation!
+                logger.info(f"[CLARIFICATION] Caller rejected interpretation of '{pending.get('raw_phrase')}'")
+                session.pending_clarification = None
+                session.state = SessionState.COLLECTING_DETAILS
+                if caller_lang == "ENGLISH":
+                    rej_prompt = "Understood, my mistake. Could you please state your detail or symptom again?"
+                elif caller_lang == "HINDI_DEVANAGARI":
+                    rej_prompt = "माफ़ कीजियेगा, मैंने गलत समझा। कृपया अपनी परेशानी या नाम दोबारा स्पष्ट बताइये।"
+                else:
+                    rej_prompt = "Maaf kariyega, maine galat samjha. Kripya apni pareshani ya naam dobara clearly batayein."
+                cleaned = clean_for_speech(rej_prompt)
+                session_manager.add_model_message(call_sid, cleaned)
+                return cleaned, False
+
+            else:
+                # Neither clear yes nor no: repeat clarification prompt
+                clarify_prompt = pending["prompts"].get(caller_lang, pending["prompts"]["ENGLISH"])
+                cleaned = clean_for_speech(clarify_prompt)
+                session_manager.add_model_message(call_sid, cleaned)
+                return cleaned, False
+
+        # 4. Low Confidence Gate (Requirement 5)
+        low_threshold = getattr(settings, "STT_LOW_CONFIDENCE_THRESHOLD", 0.35)
+        if confidence is not None and confidence < low_threshold:
+            logger.warning(f"[STT CONFIDENCE] Low confidence score {confidence:.2f} for '{user_speech}'. Asking caller to repeat.")
+            if caller_lang == "ENGLISH":
+                low_msg = "I am having a little trouble hearing you clearly. Could you please repeat that?"
+            elif caller_lang == "HINDI_DEVANAGARI":
+                low_msg = "माफ़ कीजियेगा, फ़ोन लाइन में आवाज़ स्पष्ट नहीं आई। क्या आप दोबारा कह सकते हैं?"
+            else:
+                low_msg = "Maaf kariyega, line clear nahi aayi. Kya aap dobara bata sakte hain?"
+            cleaned = clean_for_speech(low_msg)
+            session_manager.add_model_message(call_sid, cleaned)
+            return cleaned, False
+
+        # 5. Acoustic Confusion Detection before Normal Slot Extraction (Requirement 3 & 4)
+        confusion = speech_normalizer.detect_acoustic_confusion(user_speech, confidence)
+        if confusion:
+            logger.info(f"[SPEECH NORMALIZER] Detected acoustic confusion '{confusion['raw_phrase']}' -> candidate '{confusion['suggested_value']}'")
+            session.state = SessionState.AWAITING_CLARIFICATION
+            session.pending_clarification = confusion
+            clarify_prompt = confusion["prompts"].get(caller_lang, confusion["prompts"]["ENGLISH"])
+            cleaned = clean_for_speech(clarify_prompt)
+            session_manager.add_model_message(call_sid, cleaned)
+            return cleaned, False
+
+        # 6. Extract Spoken Phone Digits
         spoken_phone = parse_spoken_hindi_numbers(user_speech)
         if spoken_phone and not spoken_phone.endswith("7372212163"):
             state_machine.update_session_slots(session, {"phone_number": spoken_phone})
             session.caller_phone = spoken_phone
 
-        # 3. Post-Booking Call Wrap-Up
+        # 7. Post-Booking Call Wrap-Up
         if session.is_completed or session.state == SessionState.BOOKING_COMPLETED:
             if state_machine.is_wrapup(user_lower):
                 session.state = SessionState.CALL_WRAPUP
@@ -246,7 +359,6 @@ class LLMService:
                 session_manager.add_model_message(call_sid, farewell)
                 return farewell, True
 
-        session_manager.add_user_message(call_sid, user_speech)
         logger.info(f"\n[CALL {call_sid[-6:]}] User Said ({caller_lang}, State={session.state}): '{user_speech}'")
 
         # 4. Handle Active Awaiting Explicit Confirmation State
@@ -349,8 +461,15 @@ class LLMService:
                 session_manager.add_model_message(call_sid, prompt_again)
                 return prompt_again, False
 
-        # 5. Extract Candidate Slots via LLM
+        # 5. Extract Candidate Slots via LLM and Clinical Domain Vocabulary
         extracted_slots, direct_text = self._extract_slots_from_llm(session, user_speech, caller_lang)
+        if not extracted_slots:
+            extracted_slots = {}
+        if "symptoms" not in extracted_slots or not extracted_slots["symptoms"]:
+            known_symptom = speech_normalizer.match_known_symptom(user_speech)
+            if known_symptom:
+                extracted_slots["symptoms"] = known_symptom
+                logger.info(f"[SPEECH NORMALIZER] Matched domain symptom '{known_symptom}' from speech: '{user_speech}'")
         if extracted_slots:
             state_machine.update_session_slots(session, extracted_slots)
 

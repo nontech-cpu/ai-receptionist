@@ -36,6 +36,7 @@ def test_api_make_call_validation(client: TestClient, monkeypatch):
     Validates /api/make-call outbound dialer endpoint:
     - Missing 'to_number' parameter returns HTTP 400 Bad Request.
     - Missing Twilio credentials fails safely with HTTP 500.
+    - Does not introduce Admin API key requirement for outbound testing dialer.
     """
     # 1. Missing to_number -> HTTP 400 Bad Request
     res_no_num = client.post("/api/make-call")

@@ -142,3 +142,45 @@ def test_excel_write_failure_preserves_backup_and_recovers(protect_production_ex
     wb_backup.close()
     assert len(rows) == 2
     assert rows[1][2] == "Baseline Patient"
+
+def test_consultation_fee_question_after_failed_booking(protect_production_excel, monkeypatch):
+    """
+    Regression Incident E:
+    Consultation fee question after failed booking: answer ₹500 without retrying the previous booking.
+    """
+    call_sid = "CA_FEE_AFTER_FAIL_01"
+    session = session_manager.get_or_create(call_sid, "+919829012345")
+    session.language = "ENGLISH"
+
+    # Pre-fill details, but appointment_time was cleared after failed Sunday validation
+    session.set_slot("patient_name", "Rahul")
+    session.set_slot("symptoms", "Fever")
+    session.set_slot("appointment_date", "2026-11-29")  # Sunday
+    session.set_slot("appointment_time", None)  # Cleared after Sunday rejection
+
+    # Mock Gemini to answer the FAQ question
+    def mock_gemini_faq(messages, system_prompt, include_tools=True):
+        return {
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "The consultation fee for Dr. Sharma is ₹500."}]
+                }
+            }]
+        }
+    monkeypatch.setattr(llm_service, "_call_gemini_api", mock_gemini_faq)
+
+    # Caller asks about fee
+    reply, is_done = llm_service.process_turn(call_sid, "What is the consultation fee?")
+
+    # 1. Reply includes the fee (500 or ₹500)
+    assert "500" in reply
+
+    # 2. Did NOT retry the failed booking or enter completed state
+    assert not session.is_completed
+    assert session.state != "BOOKING_COMPLETED"
+
+    # 3. Excel sheet remains untouched
+    wb = openpyxl.load_workbook(protect_production_excel)
+    rows = list(wb.active.iter_rows(values_only=True))
+    wb.close()
+    assert len(rows) == 1, "Failed booking must not write to Excel when asking FAQ!"

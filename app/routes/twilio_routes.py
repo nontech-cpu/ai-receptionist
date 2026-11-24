@@ -1,4 +1,5 @@
 import logging
+from typing import Optional, Union, Dict, Any, Tuple
 from fastapi import APIRouter, Request, Form, Response, WebSocket
 from fastapi.responses import JSONResponse
 from twilio.twiml.voice_response import VoiceResponse, Gather, Connect, Stream, Parameter
@@ -9,6 +10,7 @@ from app.services.llm_service import llm_service
 from app.services.elevenlabs_service import elevenlabs_service
 from app.services.streaming_voice_service import streaming_voice_service
 from app.services.clinic_service import clinic_service
+from app.services.speech_normalizer import speech_normalizer
 from app.core.security import verify_admin_key, verify_twilio_signature, mask_sensitive_data
 
 router = APIRouter()
@@ -17,12 +19,11 @@ logger = logging.getLogger(__name__)
 VOICE_NAME = "Polly.Kajal-Neural"
 VOICE_LANG = "hi-IN"
 SPEECH_HINTS = (
-    "fees, fee, paise, rupees, consultation, charge, cost, address, location, landmark, timing, "
-    "parking, appointment, booking, doctor, clinic, Devendra, Devender, Rahul, Sharma, "
-    "today, tomorrow, number, phone, bhai, bukhar, khansi, checkup, "
-    "dast, dast hai, ulti, pet dard, sir dard, 10 din, 2 din, 3 din, 10 days, 10 deen, "
-    "kal, aaj, subah, shaam, 11 baje, 6 baje, 7 baje, loose motion, "
-    "I want to book an appointment, appointment book karna hai, doctor se milna hai, checkup karwana hai"
+    "cough, cold, fever, headache, sore throat, chest pain, stomach pain, vomiting, nausea, body pain, "
+    "allergy, breathing difficulty, weakness, Nescafé, Nescafe, consultation, appointment, doctor, "
+    "follow-up, prescription, medicine, Dr. Sharma, clinic, Neerav, Devendra, Rahul, Anita, Sunil, "
+    "khansi, bukhar, sardi, jukam, pet dard, sir dard, ulti, dast, gale me dard, kamzori, checkup, "
+    "fees, fee, address, timing, today, tomorrow, kal, aaj, subah, shaam, 11 AM, 6 PM"
 )
 
 def get_initial_greeting() -> str:
@@ -61,28 +62,123 @@ async def extract_request_data(request: Request) -> dict:
                 pass
     return data
 
-def create_gather(base_url: str = "", language: str = "en-IN") -> Gather:
+SUPPORTED_TWILIO_STT_CONFIGS = {
+    "en-IN": {
+        "supported_models": ["default", "experimental_conversations"],
+        "unsupported_models": ["phone_call"],
+        "enhanced_supported": False,
+    },
+    "hi-IN": {
+        "supported_models": ["default", "experimental_conversations"],
+        "unsupported_models": ["phone_call"],
+        "enhanced_supported": False,
+    },
+    "en-US": {
+        "supported_models": ["default", "phone_call", "numbers_and_commands", "experimental_conversations"],
+        "unsupported_models": [],
+        "enhanced_supported": True,
+    }
+}
+
+def validate_gather_speech_config(
+    language: str,
+    speech_model: Optional[str] = "default",
+    speech_timeout: Optional[Union[str, int]] = "3",
+    enhanced: Optional[bool] = None
+) -> Dict[str, Any]:
+    """
+    Validates Twilio <Gather> speech recognition configurations:
+    1. Language & SpeechModel compatibility:
+       - 'en-IN' and 'hi-IN' only officially support speech_model='default' or 'experimental_conversations'.
+       - 'phone_call' is NOT supported for 'en-IN' or 'hi-IN' in Twilio's specification.
+    2. speechTimeout rule:
+       - When speechModel is explicitly set, speechTimeout MUST be a positive integer (not 'auto').
+    3. enhanced attribute review:
+       - 'enhanced' is unsupported / deprecated for 'default' and Indian locales.
+    """
+    lang_info = SUPPORTED_TWILIO_STT_CONFIGS.get(language)
+    if lang_info and speech_model in lang_info["unsupported_models"]:
+        raise ValueError(
+            f"Twilio speechModel '{speech_model}' is not supported for language '{language}'. "
+            f"Supported models: {lang_info['supported_models']}."
+        )
+
+    if speech_model:
+        if speech_timeout is None or str(speech_timeout).lower() == "auto":
+            raise ValueError(
+                f"Twilio Gather constraint: When speechModel ('{speech_model}') is explicitly specified, "
+                f"speechTimeout cannot be 'auto'. It must be a positive integer (e.g. 3)."
+            )
+        try:
+            t_int = int(speech_timeout)
+            if t_int <= 0:
+                raise ValueError(f"speechTimeout must be a positive integer, got {t_int}.")
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid speechTimeout '{speech_timeout}'. Must be a positive integer.")
+    else:
+        t_int = 3
+
+    if enhanced is True:
+        if not lang_info or not lang_info["enhanced_supported"] or speech_model != "phone_call":
+            raise ValueError(
+                f"The 'enhanced' attribute is deprecated/unsupported for language '{language}' "
+                f"with speechModel='{speech_model}'."
+            )
+
+    return {
+        "language": language,
+        "speech_model": speech_model,
+        "speech_timeout": str(t_int),
+        "enhanced": enhanced if (lang_info and lang_info["enhanced_supported"] and speech_model == "phone_call") else None
+    }
+
+def create_gather(
+    base_url: str = "",
+    language: str = None,
+    session = None,
+    speech_model: str = "default",
+    speech_timeout: str = "3"
+) -> Gather:
     """
     Standard listening window supporting speech + keypad DTMF input:
-    - speech_model='phone_call' with enhanced=True: Google Telephony model trained on 8kHz mobile audio.
-    - language='en-IN': Natively transcribes English, Indian English, and Roman Hinglish with high fidelity.
-    - speech_timeout='auto' with timeout='7': prevents premature cutoffs.
-    - Explicit absolute action URL prevents cross-host resolution failures.
+    - Automatically adjusts language: 'hi-IN' for native Hindi, 'en-IN' for Indian English & Hinglish.
+    - speech_model='default': Fully supported by Twilio across en-IN and hi-IN.
+    - speech_timeout='3': Positive integer required by Twilio when speechModel is specified (preserves natural caller pauses).
+    - enhanced attribute is omitted (unsupported for en-IN/hi-IN default model).
+    - Biased with comprehensive clinical symptom and domain vocabulary hints.
     """
     action_url = f"{base_url}/voice/respond" if base_url else "/voice/respond"
-    return Gather(
-        input="speech dtmf",
-        num_digits=10,
-        finish_on_key="#",
-        action=action_url,
-        method="POST",
-        speech_timeout="auto",
-        timeout="7",
-        hints=SPEECH_HINTS,
-        language=language,
-        speech_model="phone_call",
-        enhanced=True
+
+    if language:
+        gather_lang = language
+    elif session and getattr(session, "language", "") == "HINDI_DEVANAGARI":
+        gather_lang = "hi-IN"
+    else:
+        gather_lang = "en-IN"
+
+    validated = validate_gather_speech_config(
+        language=gather_lang,
+        speech_model=speech_model,
+        speech_timeout=speech_timeout,
+        enhanced=None
     )
+
+    gather_kwargs = {
+        "input": "speech dtmf",
+        "num_digits": 10,
+        "finish_on_key": "#",
+        "action": action_url,
+        "method": "POST",
+        "speech_timeout": validated["speech_timeout"],
+        "timeout": "7",
+        "hints": SPEECH_HINTS,
+        "language": validated["language"],
+        "speech_model": validated["speech_model"]
+    }
+    if validated["enhanced"] is not None:
+        gather_kwargs["enhanced"] = validated["enhanced"]
+
+    return Gather(**gather_kwargs)
 
 def is_devanagari(text: str) -> bool:
     """Detects if text contains native Devanagari script."""
@@ -160,7 +256,7 @@ async def voice_incoming(request: Request):
 
     resp = VoiceResponse()
     speak_or_play(resp, greeting, base_url)
-    gather = create_gather(base_url)
+    gather = create_gather(base_url, session=session)
     resp.append(gather)
 
     # If initial 8s silence expires, Twilio falls through to voice/respond automatically
@@ -181,7 +277,8 @@ async def voice_respond(request: Request):
     call_sid = data.get("CallSid", "unknown_call")
     user_speech = data.get("SpeechResult", "").strip()
     digits = data.get("Digits", "").strip()
-    confidence = data.get("Confidence", "1.0")
+    raw_confidence = data.get("Confidence")
+    confidence = speech_normalizer.parse_stt_confidence(raw_confidence)
 
     if digits:
         if user_speech:
@@ -222,7 +319,7 @@ async def voice_respond(request: Request):
             else:
                 silence_msg = "Maaf kariyega, aapki aawaz nahi aayi. Kripya batayein main aapki kya madad kar sakti hoon?"
             speak_or_play(resp, silence_msg, base_url)
-            gather = create_gather(base_url)
+            gather = create_gather(base_url, session=session)
             resp.append(gather)
             resp.redirect(f"{base_url}/voice/respond", method="POST")
             return Response(content=str(resp), media_type="text/xml")
@@ -244,7 +341,7 @@ async def voice_respond(request: Request):
     session.silence_count = 0
     print(f"\n>>> [TWILIO WEBHOOK] User Speech: '{user_speech}' (Confidence: {confidence}, CallSid: {call_sid[-6:]})")
 
-    reply_text, is_done = llm_service.process_turn(call_sid, user_speech)
+    reply_text, is_done = llm_service.process_turn(call_sid, user_speech, confidence=confidence)
     print(f"<<< [TWILIO REPLY] AI Voice: '{reply_text}' (is_done={is_done})")
 
     # Deliver reply cleanly to caller first without premature microphone interruption
@@ -255,7 +352,7 @@ async def voice_respond(request: Request):
         resp.hangup()
     else:
         # Active conversation: gather next user response
-        gather = create_gather(base_url)
+        gather = create_gather(base_url, session=session)
         resp.append(gather)
         # If user stays silent after reply, falls through to silence handler
         resp.redirect(f"{base_url}/voice/respond", method="POST")

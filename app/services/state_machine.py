@@ -16,6 +16,7 @@ class SessionState(str, Enum):
     GREETING = "GREETING"
     UNDERSTAND_REQUEST = "UNDERSTAND_REQUEST"
     COLLECTING_DETAILS = "COLLECTING_DETAILS"
+    AWAITING_CLARIFICATION = "AWAITING_CLARIFICATION"
     VALIDATING = "VALIDATING"
     AWAITING_EXPLICIT_CONFIRMATION = "AWAITING_EXPLICIT_CONFIRMATION"
     BOOKING_COMPLETED = "BOOKING_COMPLETED"
@@ -99,7 +100,20 @@ class ReceptionistStateMachine:
         if slot_name == "patient_name":
             # Strip titles and generic placeholders
             cleaned = val_str.title()
-            if cleaned.lower() in ("patient", "user", "someone", "caller", "doctor", "dr"):
+            lower = cleaned.lower()
+            if lower in ("patient", "user", "someone", "caller", "doctor", "dr"):
+                return None
+            # Requirement 4: Medical symptoms must NEVER automatically become a patient name
+            symptom_words = {
+                "cough", "cold", "fever", "headache", "sore throat", "chest pain", "stomach pain",
+                "vomiting", "nausea", "body pain", "allergy", "khansi", "bukhar", "sardi", "jukam",
+                "pet dard", "sir dard", "ulti", "dast", "kamzori"
+            }
+            if lower in symptom_words:
+                logger.warning(f"[STATE MACHINE] Rejecting symptom '{cleaned}' from patient_name slot.")
+                return None
+            # Requirement 4: Brand names (e.g. Nescafé, Nice Cafe) require explicit confirmation
+            if lower in ("nescafe", "nescafé", "nice cafe", "coffee"):
                 return None
             return cleaned
 
@@ -126,7 +140,12 @@ class ReceptionistStateMachine:
             return None
 
         elif slot_name == "symptoms":
-            if val_str.lower() in ("general consultation", "routine", "none"):
+            lower_s = val_str.lower()
+            if lower_s in ("general consultation", "routine", "none"):
+                return None
+            # Requirement 4: Brands or beverages must never become symptoms
+            if lower_s in ("nescafe", "nescafé", "nice cafe", "coffee", "tea", "hotel", "cafe"):
+                logger.warning(f"[STATE MACHINE] Rejecting non-symptom brand '{val_str}' from symptoms slot.")
                 return None
             return val_str
 

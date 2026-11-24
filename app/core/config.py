@@ -17,6 +17,11 @@ class Settings:
     WEBHOOK_BASE_URL: str = os.getenv("WEBHOOK_BASE_URL", "")
     TWILIO_VALIDATE_SIGNATURE: bool = os.getenv("TWILIO_VALIDATE_SIGNATURE", "false").lower() in ("true", "1", "yes")
 
+    # Speech Recognition & Confidence Thresholds
+    STT_HIGH_CONFIDENCE_THRESHOLD: float = float(os.getenv("STT_HIGH_CONFIDENCE_THRESHOLD", "0.80"))
+    STT_MEDIUM_CONFIDENCE_THRESHOLD: float = float(os.getenv("STT_MEDIUM_CONFIDENCE_THRESHOLD", "0.55"))
+    STT_LOW_CONFIDENCE_THRESHOLD: float = float(os.getenv("STT_LOW_CONFIDENCE_THRESHOLD", "0.35"))
+
     # Twilio
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
     TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")

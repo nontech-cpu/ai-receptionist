@@ -25,6 +25,9 @@ class CallSession:
     appointment_data: Optional[dict] = None
     silence_count: int = 0  # Tracks consecutive silence gaps
     language: str = "ENGLISH"  # Persists caller conversation language (sticky session memory)
+    raw_transcripts: List[Dict[str, Any]] = field(default_factory=list)  # Audit log of all raw STT utterances
+    pending_clarification: Optional[Dict[str, Any]] = None  # Holds candidate confusion awaiting caller confirmation
+    slot_sources: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # Source and confirmation status per slot
     created_at: datetime = field(default_factory=datetime.now)
     last_active: datetime = field(default_factory=datetime.now)
 
